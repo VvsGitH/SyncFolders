@@ -9,7 +9,7 @@ class File:
         self.path = path
 
     def __str__(self):
-        return f'File name: {self.name}\nFile path: {self.path}'
+        return f'{self.path}{self.name}'
 
 
 class Folder:
@@ -22,7 +22,7 @@ class Folder:
         self.find_files()
 
     def __str__(self):
-        return f'Folder name: {self.name}\nFolder path: {self.path}\nFolder file list: {self.get_file_list()}'
+        return f'{self.path}'
 
     def find_name(self):
         post = self.path.rfind('/')
@@ -32,20 +32,22 @@ class Folder:
     def find_files(self):
         content_list = os.listdir(self.path)
         for content in content_list:
-            print('valutazione', content)
             if not os.path.isdir(self.path + content):
-                print(content,' è un file')
                 self.file_list.append(File(content, self.path))
-            # else:
-               # self.sub_folder_list.append(Folder(f'{self.path}{content}/'))
+            else:
+                self.sub_folder_list.append(Folder(f'{self.path}{content}/'))
 
     def get_file_list(self):
+        file_list = []
         for file in self.file_list:
-            print(file.name)
+            file_list.append(str(file))
+        return file_list
 
     def get_sub_folder_list(self):
+        sub_list = []
         for sub_folder in self.sub_folder_list:
-            print(sub_folder.name)
+            sub_list.append(str(sub_folder))
+        return sub_list
 
 
 def folder_checker(path):
@@ -60,7 +62,4 @@ def folder_checker(path):
 
 PATH = './TestFolder/'
 sourceFolder = Folder(PATH)
-# print(sourceFolder)
-print(sourceFolder.get_file_list())
-# print(sourceFolder.get_sub_folder_list())
-
+print(sourceFolder.get_sub_folder_list())
