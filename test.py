@@ -4,19 +4,23 @@ import shutil
 
 class File:
 
-    def __init__(self, name, path):
+    def __init__(self, path, name):
         self.name = name
         self.path = path
+        self.stats = os.stat(path)
 
     def __str__(self):
-        return f'{self.path}{self.name}'
+        return f'{self.path}'
 
 
 class Folder:
 
-    def __init__(self, path):
+    def __init__(self, path, name=''):
         self.path = path
-        self.name = self.find_name()
+        if name == 'None':
+            self.name = self.find_name()
+        else:
+            self.name = name
         self.sub_folder_dict = {}
         self.sub_folder_keys = []
         self.file_dict = {}
@@ -35,10 +39,10 @@ class Folder:
         content_list = os.listdir(self.path)
         for content in content_list:
             if not os.path.isdir(self.path + content):
-                self.file_dict[content] = File(content, self.path)
+                self.file_dict[content] = File(f'{self.path}{content}', content)
                 self.file_keys.append(content)
             else:
-                self.sub_folder_dict[content] = Folder(f'{self.path}{content}/')
+                self.sub_folder_dict[content] = Folder(f'{self.path}{content}/', content)
                 self.sub_folder_keys.append(content)
 
     def get_file_list(self):
@@ -67,3 +71,6 @@ def folder_checker(path):
 PATH = './TestFolder/'
 sourceFolder = Folder(PATH)
 print(sourceFolder.get_sub_folder_list())
+print(sourceFolder.get_file_list())
+# print last modify date
+print(sourceFolder.file_dict[sourceFolder.file_keys[0]].stats.st_mtime)
