@@ -26,7 +26,7 @@ def file_checker(master_root, slave_root):
     ms_index_vector = ['']*len(master_root)
     for ind, file in enumerate(master_root):
         ms_index_vector[ind] = slave_root.index(file) if (file in slave_root) else 'np'
-    sm_index_vector = ['']*len(slave_root)
+        sm_index_vector = ['']*len(slave_root)
     for ind, file in enumerate(slave_root):
         sm_index_vector[ind] = master_root.index(file) if (file in master_root) else 'np'
     return ms_index_vector, sm_index_vector
@@ -102,7 +102,3 @@ for i, elm in enumerate(sd_match):
             shutil.copy2(folder_root1[i], folder_root2[int(elm)])
 else:
     print('no old files in destination or source folder')
-
-
-
-

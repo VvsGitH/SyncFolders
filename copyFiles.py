@@ -14,5 +14,5 @@ def display_file_stats(filename):
 # os.mkdir('TestFolder') create folder
 display_file_stats('TestFile.txt')
 
-shutil.copy2('TestFile.txt','TestFolder/TestFile.txt')
+shutil.copy2('TestFile.txt', 'TestFolder/TestFile.txt')
 display_file_stats('TestFolder/TestFile.txt')

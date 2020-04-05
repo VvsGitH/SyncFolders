@@ -16,4 +16,3 @@ current_path = './'
 root = root_extractor(current_path)
 print(root)
 print(root[0][1])
-
