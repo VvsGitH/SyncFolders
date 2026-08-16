@@ -1,0 +1,97 @@
+# CLAUDE.md
+
+Guidance for Claude Code when working in this repository.
+
+## What this is
+
+`sync` is a single-file CLI that mirrors a source folder into the current working directory.
+One-way mirror, not a merge: files in the destination that are not in the source (and not
+excluded) get **deleted**. Read `README.md` for the user-facing behavior — do not duplicate
+that content here.
+
+## Layout
+
+| File | Role |
+| --- | --- |
+| `sync.py` | The entire tool. All logic lives here. |
+| `sync.bat` | Windows wrapper; prefers the `py -3` launcher, falls back to `python`. |
+| `README.md` | User documentation. |
+
+`sync.py` is organized in commented sections: glob matching, interactive config setup, config
+loading, scanning, synchronization, `main()`. Keep new code inside the matching section.
+
+## Hard constraints
+
+- **Standard library only.** No dependencies, ever — the tool is meant to be dropped onto the
+  `PATH` as two files. Do not add a `requirements.txt`, a `pyproject.toml`, or a package layout
+  unless explicitly asked.
+- **Single file.** `sync.py` must stay self-contained and directly runnable; do not split it
+  into modules.
+- **Python 3.11+** is the floor (`tomllib`). The `from __future__ import annotations` import at
+  the top is what allows `str | None` style hints — keep it.
+- **Everything in English**: code, comments, docstrings, CLI output, config template, docs.
+  The project was translated from Italian; do not reintroduce Italian strings.
+
+## Conventions
+
+- PEP 8, 4-space indent, formatted with `autopep8` (see commit `5fae635`).
+- Errors that must stop the run use `sys.exit("Error: ...")`. Per-entry I/O failures do **not**
+  stop the run: print `  ! ...` to `stderr`, increment `stats["errors"]`, and `continue`.
+  The exit code is `1` when `stats["errors"]` is non-zero.
+- Relative paths are handled as **posix strings** (`Path.as_posix()`) everywhere, on every
+  platform. Exclusion matching, the scan dicts, and the `protected` set all rely on this.
+- User-visible progress goes through the local `log()` helper in `sync()`, which is silenced by
+  `--quiet`. Every mutation must be wrapped in `if not dry_run:` and still counted in `stats`,
+  so `-n` reports exactly what a real run would do.
+
+## Things that are easy to break
+
+- **Operation order in `sync()`** is deliberate: deletions → folder creation → file copy →
+  symlinks. Deleting first clears file/folder conflicts. Folders are deleted deepest-first and
+  created shallowest-first. Do not reorder.
+- **`protected`** holds `SCRIPT_PATH` and the config file, relative to the destination. It is
+  what stops the tool from deleting itself or its own `sync.toml`. Any new deletion path must
+  honor it.
+- **Exclusions are symmetric**: an excluded entry is neither copied nor deleted. `scan_dest()`
+  applies the same `Matcher` as `scan_source()` — that is the mechanism, not an accident.
+- **A failing `rmdir` is expected**, not an error: it means the folder still holds excluded or
+  protected entries and must be kept. It is intentionally not counted in `stats["errors"]`.
+- `_compile()` implements `.gitignore` semantics by hand (anchoring, `dir_only`, `IGNORECASE`
+  on Windows only). Negation (`!pattern`) is **not** supported; adding it means reworking
+  `Matcher.__call__` into last-match-wins.
+- `needs_copy()` compares size and mtime with a 1-second tolerance, never content hashes.
+
+## Verifying changes
+
+There is no test suite. Verify by hand in a throwaway folder, and always check the dry run
+first — the tool deletes files.
+
+```powershell
+$t = Join-Path $env:TEMP "synctest"
+Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$t\src\sub", "$t\src\node_modules", "$t\dst" | Out-Null
+Set-Content "$t\src\a.txt" "hello" -Encoding utf8
+Set-Content "$t\src\sub\b.txt" "world" -Encoding utf8
+Set-Content "$t\src\node_modules\skip.txt" "x" -Encoding utf8
+Set-Content "$t\dst\stale.txt" "old" -Encoding utf8
+Push-Location "$t\dst"
+python D:\MyProjects\Python\sync_folders\sync.py --init --source "$t\src"
+python D:\MyProjects\Python\sync_folders\sync.py -n
+python D:\MyProjects\Python\sync_folders\sync.py -y
+Pop-Location
+Get-ChildItem -Recurse "$t\dst" | Select-Object -ExpandProperty FullName
+Remove-Item -Recurse -Force $t
+```
+
+Expected: `a.txt` and `sub/b.txt` copied, `node_modules/` skipped, `stale.txt` deleted,
+`sync.toml` kept.
+
+Also worth exercising when touching the relevant code: a second run must be a no-op (mtime
+check), `--init` on an existing config must prompt before overwriting, and a non-TTY run
+without `--source` must exit with an error.
+
+## Local environment note
+
+On this machine the `py` launcher is not installed, so `sync.bat` always takes the `python`
+fallback branch. Invoke `sync.py` through `python` directly when testing; the `py -3` branch
+of the wrapper cannot be exercised here.
