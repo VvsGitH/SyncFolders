@@ -196,6 +196,23 @@ class TestFirstRunConfirmation(CliCase):
         self.assertTrue(summary(result.stdout).startswith("[dry-run]"))
 
 
+class TestFailureReporting(CliCase):
+
+    def test_a_blocking_folder_is_reported_and_exits_one(self):
+        # the destination folder holds an excluded entry, so it cannot be
+        # removed to make room for the source file of the same name
+        build(self.src, {"x": "a file", "ok.txt": "copied anyway"})
+        build(self.dest, {"x/keep.log": "excluded"})
+        self.init()
+        result = self.sync("-y")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("cannot copy x", result.stderr)
+        self.assertIn("errors 1", summary(result.stdout))
+        # the rest of the mirror still went through
+        self.assertDest({"ok.txt": "copied anyway", "x/": DIR,
+                         "x/keep.log": "excluded"})
+
+
 class TestJunctionRegression(CliCase):
 
     @needs_junctions

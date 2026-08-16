@@ -1,13 +1,16 @@
 """The mirror itself: the four phases, dry-run fidelity, and what is spared."""
 
 import io
+import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
 import sync
 
 from .support import (DIR, TreeCase, build, failing_scandir, make_junction,
-                      needs_junctions, operations, snapshot, summary)
+                      needs_junctions, needs_symlinks, operations, snapshot,
+                      summary)
 
 
 class SyncCase(TreeCase):
@@ -73,22 +76,41 @@ class TestMirroring(SyncCase):
         self.run_sync()
         self.assertDest({"x": "now a file"})
 
-    @unittest.expectedFailure
-    def test_source_file_over_a_kept_destination_folder(self):
-        """KNOWN BUG: the file lands *inside* the folder instead of failing.
+    def test_source_file_over_a_kept_destination_folder_is_an_error(self):
+        """A folder phase 1 could not remove must not be copied into.
 
-        When the destination folder cannot be removed because it holds excluded
-        entries, phase 3 calls shutil.copy2 with a directory as the target.
-        copy2 does not refuse: it copies *into* the directory, so the mirror
-        grows a spurious dest/x/x, reports 'updated 1, errors 0', and never
-        converges -- every later run reports the same update again.
-
-        Remove this decorator once phase 3 checks the target before copying.
+        shutil.copy2 given a directory copies *into* it, so this used to leave
+        a spurious dest/x/x, report 'updated 1, errors 0', and never converge.
         """
         build(self.src, {"x": "a file"})
         build(self.dest, {"x/keep.log": "excluded"})
-        self.run_sync("*.log")
+        with redirect_stderr(io.StringIO()):
+            code = self.run_sync("*.log")
+
+        self.assertEqual(1, code)
+        self.assertIn("errors 1", summary(self.out))
         self.assertNotIn("x/x", snapshot(self.dest))
+        # the excluded entry, and the folder holding it, are still spared
+        self.assertDest({"x/": DIR, "x/keep.log": "excluded"})
+
+    def test_the_blocking_folder_is_reported_in_dry_run_too(self):
+        # a preview that hides the problem is worse than no preview
+        build(self.src, {"x": "a file"})
+        build(self.dest, {"x/keep.log": "excluded"})
+        with redirect_stderr(io.StringIO()) as err:
+            code = self.run_sync("*.log", dry_run=True)
+        self.assertEqual(1, code)
+        self.assertIn("cannot copy x", err.getvalue())
+        self.assertEqual({"x/": DIR, "x/keep.log": "excluded"},
+                         snapshot(self.dest))
+
+    def test_a_file_replaces_an_empty_destination_folder(self):
+        # the folder is removable, so this must still work
+        build(self.src, {"x": "a file"})
+        build(self.dest, {"x/": DIR})
+        code = self.run_sync()
+        self.assertEqual(0, code)
+        self.assertDest({"x": "a file"})
 
 
 class TestExclusions(SyncCase):
@@ -183,6 +205,84 @@ class TestStatsAndExitCode(SyncCase):
         self.run_sync(verbose=False)
         self.assertEqual([], operations(self.out))
         self.assertIn("Copied 1", self.out)
+
+
+class TestSymlinks(SyncCase):
+    """follow_symlinks = false: links are recreated, not followed."""
+
+    def link_to(self, path: Path, target: Path, is_dir=False):
+        path.symlink_to(target, target_is_directory=is_dir)
+
+    @needs_symlinks
+    def test_a_file_link_is_recreated_as_a_link(self):
+        build(self.src, {"real.txt": "content"})
+        self.link_to(self.src / "alias.txt", self.src / "real.txt")
+        self.run_sync()
+        self.assertTrue((self.dest / "alias.txt").is_symlink())
+        self.assertEqual(os.readlink(self.src / "alias.txt"),
+                         os.readlink(self.dest / "alias.txt"))
+
+    @needs_symlinks
+    def test_an_unchanged_link_is_left_alone(self):
+        build(self.src, {"real.txt": "content"})
+        self.link_to(self.src / "alias.txt", self.src / "real.txt")
+        self.run_sync()
+        self.run_sync()
+        self.assertEqual([], operations(self.out))
+
+    @needs_symlinks
+    def test_a_retargeted_link_is_replaced(self):
+        build(self.src, {"a.txt": "a", "b.txt": "b"})
+        self.link_to(self.src / "alias.txt", self.src / "a.txt")
+        self.run_sync()
+        (self.src / "alias.txt").unlink()
+        self.link_to(self.src / "alias.txt", self.src / "b.txt")
+        self.run_sync()
+        self.assertEqual(os.readlink(self.src / "alias.txt"),
+                         os.readlink(self.dest / "alias.txt"))
+
+    @needs_symlinks
+    def test_a_link_replaces_a_plain_destination_file(self):
+        build(self.src, {"real.txt": "content"})
+        self.link_to(self.src / "alias.txt", self.src / "real.txt")
+        build(self.dest, {"alias.txt": "I am a plain file"})
+        self.run_sync()
+        self.assertTrue((self.dest / "alias.txt").is_symlink())
+
+    @needs_symlinks
+    def test_a_stale_link_in_the_destination_is_deleted(self):
+        build(self.src, {"a.txt": "x"})
+        build(self.dest, {"real.txt": "content"})
+        self.link_to(self.dest / "stale.txt", self.dest / "real.txt")
+        self.run_sync()
+        self.assertFalse((self.dest / "stale.txt").exists())
+        self.assertFalse((self.dest / "stale.txt").is_symlink())
+
+    @needs_symlinks
+    def test_following_symlinks_copies_real_content(self):
+        build(self.src, {"real.txt": "content"})
+        self.link_to(self.src / "alias.txt", self.src / "real.txt")
+        self.run_sync(follow=True)
+        self.assertFalse((self.dest / "alias.txt").is_symlink())
+        self.assertEqual("content",
+                         (self.dest / "alias.txt").read_text(encoding="utf-8"))
+
+    @needs_symlinks
+    def test_a_link_never_costs_an_excluded_entry(self):
+        """Phase 4 must not rmtree a folder phase 1 deliberately kept.
+
+        The destination folder holds an excluded entry, so phase 1 left it
+        standing. Wiping it here to make room for the link would delete
+        exactly what the exclusion promised to spare.
+        """
+        build(self.src, {"real.txt": "content"})
+        self.link_to(self.src / "x", self.src / "real.txt")
+        build(self.dest, {"x/keep.log": "excluded, must survive"})
+        with redirect_stderr(io.StringIO()):
+            code = self.run_sync("*.log")
+        self.assertEqual("excluded, must survive",
+                         (self.dest / "x" / "keep.log").read_text(encoding="utf-8"))
+        self.assertEqual(1, code)
 
 
 class TestJunctions(SyncCase):

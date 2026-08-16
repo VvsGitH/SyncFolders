@@ -58,6 +58,15 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
   applies the same `Matcher` as `scan_source()` — that is the mechanism, not an accident.
 - **A failing `rmdir` is expected**, not an error: it means the folder still holds excluded or
   protected entries and must be kept. It is intentionally not counted in `stats["errors"]`.
+  But phases 3 and 4 must then refuse to write at that path — both carry an `in_the_way` check
+  for it, and both report an error rather than forcing their way through:
+  - phase 3, because `shutil.copy2` given a directory copies *into* it rather than failing,
+    which used to leave a file the source never had while still reporting success;
+  - phase 4, because it used to `shutil.rmtree` the folder to make room for the link, deleting
+    the very entries the exclusion promised to spare.
+
+  A real folder surviving into phase 3 or 4 always means phase 1 could not remove it: everything
+  else under it was already deleted, so the `rmdir` would have succeeded.
 - `_parse()` + `_translate()` + `_build_regex()` implement `.gitignore` semantics by hand
   (anchoring, `dir_only`, `IGNORECASE` on Windows only). `Matcher` then short-circuits the
   common shapes: an unanchored pattern with no metacharacters is a set lookup on the last path
@@ -94,9 +103,8 @@ python -m unittest discover -s tests -t . -v
 ```
 
 `-t .` puts the root on `sys.path`, which is what lets the tests `import sync` with no install
-step. Expect one skip on Windows (a case-sensitivity test) and one expected failure (a known
-bug, documented in `tests/test_sync.py`). ~135 tests, ~25s — most of it is the e2e module
-spawning real subprocesses.
+step. ~145 tests, ~25s — most of it is the e2e module spawning real subprocesses. On Windows
+one case-sensitivity test skips; the symlink tests skip too unless developer mode is on.
 
 **Keep it green.** The suite was written against the behaviour as of `b5a83c0`, deliberately
 without touching `sync.py`, so that the coming split into modules can be validated by re-running

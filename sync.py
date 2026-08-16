@@ -700,16 +700,28 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         src_path, src_size, src_mtime = src_files[rel]
         target = dest / rel
         info = dst_entries.get(rel)
+        in_the_way = False
         if info is None:
             # Not seen by the destination scan: absent, a real folder, or
             # protected. Only reached for entries we are about to write, so
             # this stat never shows up on an up-to-date run.
             info = lstat_info(target)
+            # scan_dest files real folders under dst_dirs and never here, so
+            # something still standing at this point is a folder phase 1 could
+            # not remove. shutil.copy2 would not refuse it: given a directory
+            # it copies *into* it, leaving the mirror with a file the source
+            # does not have, and reporting success.
+            in_the_way = (info is not None and not info[2] and target.is_dir())
         dst_is_link = info is not None and info[2]
         existed = info is not None and not dst_is_link
-        if existed and not needs_copy(src_size, src_mtime, info[0], info[1]):
+        if existed and not in_the_way \
+                and not needs_copy(src_size, src_mtime, info[0], info[1]):
             continue
         log("update" if existed else "copy", rel)
+        if in_the_way:
+            fail("copy", rel, IsADirectoryError(
+                21, "a folder is in the way and could not be removed"))
+            continue
         if not dry_run:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -727,17 +739,26 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
             continue
         target = dest / rel
         want = src_links[rel]
-        if target.is_symlink() and os.readlink(target) == want:
+        target_is_link = is_link(target)
+        if target_is_link and os.readlink(target) == want:
             continue
+        # A real folder still standing here is one phase 1 could not remove,
+        # which only happens when it holds excluded or protected entries:
+        # everything else under it was already deleted and the rmdir would
+        # have succeeded. Clearing it to make room would delete exactly what
+        # the exclusion promised to spare.
+        in_the_way = not target_is_link and target.is_dir()
         log("link", rel)
+        if in_the_way:
+            fail("create link", rel, IsADirectoryError(
+                21, "a folder is in the way and could not be removed"))
+            continue
         if not dry_run:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if is_link(target):
+                if target_is_link:
                     # covers junctions too: unlink removes the link, not its target
                     target.unlink()
-                elif target.is_dir():
-                    shutil.rmtree(target)
                 elif target.exists():
                     target.unlink()
                 os.symlink(want, target)
