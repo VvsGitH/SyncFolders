@@ -15,7 +15,7 @@ that content here.
 | --- | --- |
 | `sync.py` | The entire tool. All logic lives here. |
 | `sync.bat` | Windows wrapper; prefers the `py -3` launcher, falls back to `python`. |
-| `test_matcher.py` | Differential test for the glob matcher. Not shipped: `sync.py` + `sync.bat` are what goes on the `PATH`. |
+| `tests/` | Unit and end-to-end suite. Not shipped: `sync.py` + `sync.bat` are what goes on the `PATH`. |
 | `README.md` | User documentation. |
 
 `sync.py` is organized in commented sections: glob matching, interactive config setup, config
@@ -68,8 +68,8 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
   feature: exclusions being a plain OR is what makes it legal for `Matcher.__call__` to check
   its buckets in any order. Adding negation means last-match-wins semantics and a rewrite of
   the whole layout, not just a new branch.
-- Any change to the matcher must keep `python test_matcher.py` green. It compares the fast path
-  against the plain regex loop over ~61k pattern/path/kind combinations and checks that the
+- Any change to the matcher must keep `tests/test_matching.py` green. It compares the fast path
+  against the plain regex loop over every pattern/path/kind combination and checks that the
   fast path is actually being taken — equality alone would also hold if everything silently
   fell back to regex.
 - `needs_copy()` compares size and mtime with a 1-second tolerance, never content hashes.
@@ -87,11 +87,34 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
 
 ## Verifying changes
 
-Run `python test_matcher.py` first when the change touches glob matching — it is the only
-automated test, and it is fast.
+Run the suite from the repo root:
 
-Everything else is verified by hand in a throwaway folder. Always check the dry run first —
-the tool deletes files.
+```
+python -m unittest discover -s tests -t . -v
+```
+
+`-t .` puts the root on `sys.path`, which is what lets the tests `import sync` with no install
+step. Expect one skip on Windows (a case-sensitivity test) and one expected failure (a known
+bug, documented in `tests/test_sync.py`). ~135 tests, ~25s — most of it is the e2e module
+spawning real subprocesses.
+
+**Keep it green.** The suite was written against the behaviour as of `b5a83c0`, deliberately
+without touching `sync.py`, so that the coming split into modules can be validated by re-running
+it: if it still passes, the refactor changed nothing.
+
+Guidance for adding tests:
+
+- `tests/support.py` has the shared helpers. Describe trees as dicts and compare with
+  `snapshot()` — a failure then shows two dicts, not a bare `False`.
+- Never make a directory unreadable with a real ACL or `chmod`: use `failing_scandir()`, which
+  patches `os.scandir`. Deterministic, cross-platform, and it cannot leave the filesystem in a
+  state that outlives the test.
+- Symlink and junction support are probed at import (`needs_symlinks`, `needs_junctions`), never
+  assumed — creating a symlink on Windows needs developer mode or admin rights.
+- Anything touching the filesystem goes under `TreeCase`, which gives an isolated `src`/`dest`
+  pair in a temp directory.
+
+Beyond the suite, check the dry run first when trying things by hand — the tool deletes files.
 
 ```powershell
 $t = Join-Path $env:TEMP "synctest"
