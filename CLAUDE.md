@@ -27,8 +27,8 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
   unless explicitly asked.
 - **Single file.** `sync.py` must stay self-contained and directly runnable; do not split it
   into modules.
-- **Python 3.11+** is the floor (`tomllib`). The `from __future__ import annotations` import at
-  the top is what allows `str | None` style hints — keep it.
+- **Python 3.11+** is the floor (`tomllib`). Native `str | None` / `list[tuple[...]]` hints are
+  used directly; no `from __future__ import annotations` is needed at that floor.
 - **Everything in English**: code, comments, docstrings, CLI output, config template, docs.
   The project was translated from Italian; do not reintroduce Italian strings.
 
@@ -36,8 +36,9 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
 
 - PEP 8, 4-space indent, formatted with `autopep8` (see commit `5fae635`).
 - Errors that must stop the run use `sys.exit("Error: ...")`. Per-entry I/O failures do **not**
-  stop the run: print `  ! ...` to `stderr`, increment `stats["errors"]`, and `continue`.
-  The exit code is `1` when `stats["errors"]` is non-zero.
+  stop the run: call the `fail()` helper inside `sync()` (prints `  ! ...` to `stderr` and
+  increments `stats["errors"]`), then `continue`. The exit code is `1` when `stats["errors"]`
+  is non-zero.
 - Relative paths are handled as **posix strings** (`Path.as_posix()`) everywhere, on every
   platform. Exclusion matching, the scan dicts, and the `protected` set all rely on this.
 - User-visible progress goes through the local `log()` helper in `sync()`, which is silenced by

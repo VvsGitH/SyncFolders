@@ -19,13 +19,12 @@ Usage:
     sync [-c CONFIG] [-n] [-q] [-y] [--init] [--source PATH]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -229,12 +228,50 @@ class Matcher:
 
 
 # --------------------------------------------------------------------------
+# Path helpers
+# --------------------------------------------------------------------------
+
+def resolve_path(raw: str, base: Path) -> Path:
+    """Expands ~ and environment variables, then resolves against `base`."""
+    p = Path(os.path.expandvars(raw)).expanduser()
+    if not p.is_absolute():
+        p = base / p
+    return p.resolve()
+
+
+def is_link(path: Path) -> bool:
+    """True for symlinks and, on Windows, for junctions/reparse points.
+
+    `Path.is_symlink()` returns False for a directory junction, so relying on
+    it alone would let `os.walk` descend into the junction and let the
+    destination scan treat the linked-to folder as part of the destination.
+    """
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    attrs = getattr(st, "st_file_attributes", 0)
+    return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def overlaps(src: Path, dest: Path) -> bool:
+    """True if source and destination are the same folder or nested."""
+    return src == dest or src in dest.parents or dest in src.parents
+
+
+def depth(rel: str) -> int:
+    """Nesting level of a relative posix path, used to order folder work."""
+    return rel.count("/")
+
+
+# --------------------------------------------------------------------------
 # Interactive configuration setup
 # --------------------------------------------------------------------------
 
-def render_config(source: str, follow: bool = False) -> str:
-    parts = [CONFIG_HEADER.format(source=json.dumps(source),
-                                  follow="true" if follow else "false")]
+def render_config(source: str) -> str:
+    parts = [CONFIG_HEADER.format(source=json.dumps(source), follow="false")]
     blocks = []
     for comment, patterns in DEFAULT_EXCLUDES:
         rows = [f"    # {comment}"]
@@ -260,18 +297,15 @@ def ask_source(dest: Path) -> str:
         raw = raw.strip().strip('"').strip("'")
         if not raw:
             continue
-        candidate = Path(os.path.expandvars(raw)).expanduser()
-        if not candidate.is_absolute():
-            candidate = dest / candidate
         try:
-            candidate = candidate.resolve()
+            candidate = resolve_path(raw, dest)
         except OSError:
             print("  Invalid path, try again.")
             continue
         if not candidate.is_dir():
             print(f"  '{candidate}' is not an existing folder, try again.")
             continue
-        if candidate == dest or candidate in dest.parents or dest in candidate.parents:
+        if overlaps(candidate, dest):
             print("  Source and destination cannot be the same or nested.")
             continue
         return str(candidate)
@@ -281,10 +315,10 @@ def create_config(path: Path, dest: Path, source: str | None) -> None:
     if source is None:
         source = ask_source(dest)
     else:
-        resolved = Path(os.path.expandvars(source)).expanduser()
-        if not resolved.is_absolute():
-            resolved = dest / resolved
-        source = str(resolved.resolve())
+        try:
+            source = str(resolve_path(source, dest))
+        except OSError:
+            sys.exit(f"Error: invalid source path: {source}")
     try:
         path.write_text(render_config(source), encoding="utf-8")
     except OSError as exc:
@@ -328,11 +362,8 @@ def load_config(path: Path, dest: Path) -> tuple[Path, Matcher, bool]:
     if not isinstance(follow, bool):
         sys.exit("Error: 'follow_symlinks' must be true or false.")
 
-    src = Path(os.path.expandvars(source)).expanduser()
-    if not src.is_absolute():
-        src = path.parent / src
     try:
-        src = src.resolve()
+        src = resolve_path(source, path.parent)
     except OSError:
         sys.exit(f"Error: invalid source path: {source}")
 
@@ -340,7 +371,7 @@ def load_config(path: Path, dest: Path) -> tuple[Path, Matcher, bool]:
         sys.exit(f"Error: the source folder does not exist: {src}")
     if src == dest:
         sys.exit("Error: source and destination are the same.")
-    if src in dest.parents or dest in src.parents:
+    if overlaps(src, dest):
         sys.exit("Error: source and destination cannot be nested.")
 
     return src, Matcher(exclude), follow
@@ -357,13 +388,14 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
     links: dict[str, str] = {}
 
     for root, dirnames, filenames in os.walk(src, topdown=True, followlinks=follow):
-        rel_root = Path(root).relative_to(src)
+        root_path = Path(root)
+        rel_root = root_path.relative_to(src)
         kept: list[str] = []
         for name in sorted(dirnames):
             rel = (rel_root / name).as_posix()
-            full = Path(root) / name
             if excluded(rel, True):
                 continue
+            full = root_path / name
             if not follow and full.is_symlink():
                 links[rel] = os.readlink(full)
                 continue
@@ -373,14 +405,11 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
 
         for name in sorted(filenames):
             rel = (rel_root / name).as_posix()
-            full = Path(root) / name
             if excluded(rel, False):
                 continue
-            if full.is_symlink():
-                if follow:
-                    files[rel] = full
-                else:
-                    links[rel] = os.readlink(full)
+            full = root_path / name
+            if not follow and full.is_symlink():
+                links[rel] = os.readlink(full)
             else:
                 files[rel] = full
 
@@ -393,14 +422,15 @@ def scan_dest(dest: Path, excluded: Matcher, protected: set[str]):
     entries: set[str] = set()
 
     for root, dirnames, filenames in os.walk(dest, topdown=True):
-        rel_root = Path(root).relative_to(dest)
+        root_path = Path(root)
+        rel_root = root_path.relative_to(dest)
         kept: list[str] = []
         for name in sorted(dirnames):
             rel = (rel_root / name).as_posix()
-            full = Path(root) / name
             if rel in protected or excluded(rel, True):
                 continue  # excluded: we leave it alone
-            if full.is_symlink():
+            full = root_path / name
+            if is_link(full):
                 entries.add(rel)  # link to a folder: handled as a single entry
                 continue
             dirs.add(rel)
@@ -420,14 +450,13 @@ def scan_dest(dest: Path, excluded: Matcher, protected: set[str]):
 # Synchronization
 # --------------------------------------------------------------------------
 
-def needs_copy(src_file: Path, dst_file: Path) -> bool:
-    if dst_file.is_symlink() or not dst_file.exists():
-        return True
+def needs_copy(src_file: Path, dst_stat: os.stat_result) -> bool:
+    """True when size or mtime differ; `dst_stat` is the destination lstat."""
     try:
-        s, d = src_file.stat(), dst_file.stat()
+        s = src_file.stat()
     except OSError:
         return True
-    return s.st_size != d.st_size or abs(s.st_mtime - d.st_mtime) > 1
+    return s.st_size != dst_stat.st_size or abs(s.st_mtime - dst_stat.st_mtime) > 1
 
 
 def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
@@ -442,13 +471,29 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
     src_dirs, src_files, src_links = scan_source(src, excluded, follow)
     dst_dirs, dst_entries = scan_dest(dest, excluded, protected)
 
-    wanted_entries = set(src_files) | set(src_links)
+    wanted_entries = src_files.keys() | src_links.keys()
     stats = {"copied": 0, "updated": 0, "links": 0, "folders": 0,
              "deleted": 0, "errors": 0}
 
     def log(action: str, rel: str) -> None:
         if verbose:
             print(f"  {action:<12} {rel}")
+
+    failed: set[str] = set()
+
+    def fail(action: str, rel: str, exc: OSError) -> None:
+        print(f"  ! cannot {action} {rel}: {exc}", file=sys.stderr)
+        stats["errors"] += 1
+        failed.add(rel)
+
+    def blocked(rel: str) -> bool:
+        """True when `rel` sits under an entry we could not remove.
+
+        Writing there would go through a leftover link and land outside the
+        destination, so those entries are skipped (the failure is already
+        reported and reflected in the exit code).
+        """
+        return any(rel == f or rel.startswith(f + "/") for f in failed)
 
     # 1) Deletions (first, to clear file/folder conflicts)
     for rel in sorted(dst_entries - wanted_entries):
@@ -458,12 +503,11 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
             try:
                 target.unlink()
             except OSError as exc:
-                print(f"  ! cannot delete {rel}: {exc}", file=sys.stderr)
-                stats["errors"] += 1
+                fail("delete", rel, exc)
                 continue
         stats["deleted"] += 1
 
-    for rel in sorted(dst_dirs - src_dirs, key=lambda r: r.count("/"), reverse=True):
+    for rel in sorted(dst_dirs - src_dirs, key=depth, reverse=True):
         target = dest / rel
         log("delete dir", rel)
         if not dry_run:
@@ -476,43 +520,51 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
                 continue
         stats["deleted"] += 1
 
-    # 2) Folder creation (empty ones included)
-    for rel in sorted(src_dirs, key=lambda r: r.count("/")):
-        target = dest / rel
-        if target.is_dir() and not target.is_symlink():
+    # 2) Folder creation (empty ones included; scan_dest already told us
+    #    which ones exist, so no need to stat them again)
+    for rel in sorted(src_dirs - dst_dirs, key=depth):
+        if blocked(rel):
             continue
+        target = dest / rel
         log("create dir", rel)
         if not dry_run:
             try:
                 target.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                print(f"  ! cannot create {rel}: {exc}", file=sys.stderr)
-                stats["errors"] += 1
+                fail("create", rel, exc)
                 continue
         stats["folders"] += 1
 
     # 3) File copy
     for rel in sorted(src_files):
+        if blocked(rel):
+            continue
         source_file = src_files[rel]
         target = dest / rel
-        existed = target.exists() and not target.is_symlink()
-        if existed and not needs_copy(source_file, target):
+        try:
+            dst_stat = os.lstat(target)
+        except OSError:
+            dst_stat = None
+        dst_is_link = dst_stat is not None and stat.S_ISLNK(dst_stat.st_mode)
+        existed = dst_stat is not None and not dst_is_link
+        if existed and not needs_copy(source_file, dst_stat):
             continue
         log("update" if existed else "copy", rel)
         if not dry_run:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if target.is_symlink():
+                if dst_is_link:
                     target.unlink()
                 shutil.copy2(source_file, target)
             except OSError as exc:
-                print(f"  ! cannot copy {rel}: {exc}", file=sys.stderr)
-                stats["errors"] += 1
+                fail("copy", rel, exc)
                 continue
         stats["updated" if existed else "copied"] += 1
 
     # 4) Symlinks recreated as such
     for rel in sorted(src_links):
+        if blocked(rel):
+            continue
         target = dest / rel
         want = src_links[rel]
         if target.is_symlink() and os.readlink(target) == want:
@@ -521,15 +573,16 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         if not dry_run:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if target.is_symlink() or target.exists():
-                    if target.is_dir() and not target.is_symlink():
-                        shutil.rmtree(target)
-                    else:
-                        target.unlink()
+                if is_link(target):
+                    # covers junctions too: unlink removes the link, not its target
+                    target.unlink()
+                elif target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
                 os.symlink(want, target)
             except OSError as exc:
-                print(f"  ! cannot create link {rel}: {exc}", file=sys.stderr)
-                stats["errors"] += 1
+                fail("create link", rel, exc)
                 continue
         stats["links"] += 1
 
@@ -564,14 +617,15 @@ def main() -> int:
     dest = Path.cwd().resolve()
     config_path = (args.config if args.config else dest / CONFIG_NAME).resolve()
 
-    first_run = False
-    if args.init or not config_path.is_file():
+    if args.init:
         if config_path.is_file() and not confirm(f"{config_path} already exists. Overwrite?"):
             return 0
         create_config(config_path, dest, args.source)
-        first_run = True
-        if args.init:
-            return 0
+        return 0
+
+    first_run = not config_path.is_file()
+    if first_run:
+        create_config(config_path, dest, args.source)
 
     src, excluded, follow = load_config(config_path, dest)
 
