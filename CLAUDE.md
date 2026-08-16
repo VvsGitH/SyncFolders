@@ -15,6 +15,7 @@ that content here.
 | --- | --- |
 | `sync.py` | The entire tool. All logic lives here. |
 | `sync.bat` | Windows wrapper; prefers the `py -3` launcher, falls back to `python`. |
+| `test_matcher.py` | Differential test for the glob matcher. Not shipped: `sync.py` + `sync.bat` are what goes on the `PATH`. |
 | `README.md` | User documentation. |
 
 `sync.py` is organized in commented sections: glob matching, interactive config setup, config
@@ -57,9 +58,20 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
   applies the same `Matcher` as `scan_source()` — that is the mechanism, not an accident.
 - **A failing `rmdir` is expected**, not an error: it means the folder still holds excluded or
   protected entries and must be kept. It is intentionally not counted in `stats["errors"]`.
-- `_compile()` implements `.gitignore` semantics by hand (anchoring, `dir_only`, `IGNORECASE`
-  on Windows only). Negation (`!pattern`) is **not** supported; adding it means reworking
-  `Matcher.__call__` into last-match-wins.
+- `_parse()` + `_translate()` + `_build_regex()` implement `.gitignore` semantics by hand
+  (anchoring, `dir_only`, `IGNORECASE` on Windows only). `Matcher` then short-circuits the
+  common shapes: an unanchored pattern with no metacharacters is a set lookup on the last path
+  segment, and `*` plus a plain tail is an `str.endswith`. Only what genuinely needs globbing
+  stays a regex — with the shipped defaults, **none of it does**. `_fast_rule()` must stay
+  conservative: anything doubtful falls back to the regex.
+- Negation (`!pattern`) is **not** supported, and that is load-bearing here, not just a missing
+  feature: exclusions being a plain OR is what makes it legal for `Matcher.__call__` to check
+  its buckets in any order. Adding negation means last-match-wins semantics and a rewrite of
+  the whole layout, not just a new branch.
+- Any change to the matcher must keep `python test_matcher.py` green. It compares the fast path
+  against the plain regex loop over ~61k pattern/path/kind combinations and checks that the
+  fast path is actually being taken — equality alone would also hold if everything silently
+  fell back to regex.
 - `needs_copy()` compares size and mtime with a 1-second tolerance, never content hashes.
   **Both sides come from their scan**, not from a fresh stat, so an up-to-date run issues no
   stat of its own. The consequence is deliberate: the run works on a snapshot, and a source
@@ -75,8 +87,11 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
 
 ## Verifying changes
 
-There is no test suite. Verify by hand in a throwaway folder, and always check the dry run
-first — the tool deletes files.
+Run `python test_matcher.py` first when the change touches glob matching — it is the only
+automated test, and it is fast.
+
+Everything else is verified by hand in a throwaway folder. Always check the dry run first —
+the tool deletes files.
 
 ```powershell
 $t = Join-Path $env:TEMP "synctest"
