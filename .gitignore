@@ -1,2 +1,23 @@
-.vscode
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
 .venv
+venv/
+
+# Editors
+.vscode
+.idea/
+
+# Profiling output, from `cProfile.run(..., "prof.out")`
+prof.out
+*.prof
+
+# Config the tool writes into whatever folder it runs in: running sync from
+# the repo root during a manual test would otherwise leave it staged.
+sync.toml
+
+# Scratch folder from the default exclude list, for things that must never
+# be copied. Only meaningful if the repo is itself used as a sync source.
+no_sync/
