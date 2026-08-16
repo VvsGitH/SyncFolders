@@ -239,21 +239,42 @@ def resolve_path(raw: str, base: Path) -> Path:
     return p.resolve()
 
 
-def is_link(path: Path) -> bool:
+def _stat_is_link(st: os.stat_result) -> bool:
     """True for symlinks and, on Windows, for junctions/reparse points.
 
-    `Path.is_symlink()` returns False for a directory junction, so relying on
-    it alone would let `os.walk` descend into the junction and let the
-    destination scan treat the linked-to folder as part of the destination.
+    `is_symlink()` returns False for a directory junction, so relying on it
+    alone would let the walk descend into the junction and let the destination
+    scan treat the linked-to folder as part of the destination.
     """
-    try:
-        st = path.lstat()
-    except OSError:
-        return False
     if stat.S_ISLNK(st.st_mode):
         return True
     attrs = getattr(st, "st_file_attributes", 0)
     return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def is_link(path: Path) -> bool:
+    """`_stat_is_link` for a path we hold no directory entry for."""
+    try:
+        return _stat_is_link(path.lstat())
+    except OSError:
+        return False
+
+
+def entry_is_link(entry: os.DirEntry) -> bool:
+    """Same test on scandir's cached data, without an extra syscall.
+
+    `is_symlink()` is free on both platforms (it comes from d_type on POSIX);
+    the reparse-point check only matters on Windows, where scandir already
+    carries `st_file_attributes` in the listing.
+    """
+    try:
+        if entry.is_symlink():
+            return True
+        if os.name != "nt":
+            return False
+        return _stat_is_link(entry.stat(follow_symlinks=False))
+    except OSError:
+        return False
 
 
 def overlaps(src: Path, dest: Path) -> bool:
@@ -261,9 +282,13 @@ def overlaps(src: Path, dest: Path) -> bool:
     return src == dest or src in dest.parents or dest in src.parents
 
 
-def depth(rel: str) -> int:
-    """Nesting level of a relative posix path, used to order folder work."""
-    return rel.count("/")
+def by_depth(rel: str) -> tuple[int, str]:
+    """Sort key ordering folders by nesting level, then by name.
+
+    The name breaks ties so the reported order does not depend on set
+    iteration, which would make two runs print the same work differently.
+    """
+    return rel.count("/"), rel
 
 
 # --------------------------------------------------------------------------
@@ -381,82 +406,139 @@ def load_config(path: Path, dest: Path) -> tuple[Path, Matcher, bool]:
 # Scanning
 # --------------------------------------------------------------------------
 
+def _listdir(root: str, rel: str) -> list[os.DirEntry] | None:
+    """Directory entries of `root`, or None (reported) if it cannot be read.
+
+    An unreadable folder is not fatal, but it must not pass unnoticed: the
+    scan would look complete while missing whatever lives under it.
+    """
+    try:
+        with os.scandir(root) as it:
+            return list(it)
+    except OSError as exc:
+        print(f"  ! cannot read {rel or '.'}: {exc}", file=sys.stderr)
+        return None
+
+
 def scan_source(src: Path, excluded: Matcher, follow: bool):
-    """Returns (dirs, files, links) keyed by relative posix paths."""
+    """Returns (dirs, files, links, errors) keyed by relative posix paths.
+
+    `files` maps to (path, size, mtime), all captured during the scan, so the
+    copy phase needs no further stat on the source.
+    """
     dirs: set[str] = set()
-    files: dict[str, Path] = {}
+    files: dict[str, tuple[str, int, float]] = {}
     links: dict[str, str] = {}
+    errors = 0
 
-    for root, dirnames, filenames in os.walk(src, topdown=True, followlinks=follow):
-        root_path = Path(root)
-        rel_root = root_path.relative_to(src)
-        kept: list[str] = []
-        for name in sorted(dirnames):
-            rel = (rel_root / name).as_posix()
-            if excluded(rel, True):
-                continue
-            full = root_path / name
-            if not follow and full.is_symlink():
-                links[rel] = os.readlink(full)
-                continue
-            dirs.add(rel)
-            kept.append(name)
-        dirnames[:] = kept
+    # Explicit stack rather than recursion: deep trees must not hit the
+    # recursion limit. Traversal order is irrelevant, sync() sorts everything.
+    stack: list[tuple[str, str]] = [(str(src), "")]
+    while stack:
+        root, rel_root = stack.pop()
+        listed = _listdir(root, rel_root)
+        if listed is None:
+            errors += 1
+            continue
 
-        for name in sorted(filenames):
-            rel = (rel_root / name).as_posix()
-            if excluded(rel, False):
+        prefix = rel_root + "/" if rel_root else ""
+        for entry in listed:
+            rel = prefix + entry.name
+            try:
+                is_dir = entry.is_dir()  # follows links, as os.walk did
+            except OSError:
+                is_dir = False
+            if excluded(rel, is_dir):
                 continue
-            full = root_path / name
-            if not follow and full.is_symlink():
-                links[rel] = os.readlink(full)
+            # is_symlink(), not entry_is_link(): a junction in the source stays
+            # real content, so it is copied as a plain folder.
+            if not follow and entry.is_symlink():
+                links[rel] = os.readlink(entry.path)
+            elif is_dir:
+                dirs.add(rel)
+                stack.append((entry.path, rel))
             else:
-                files[rel] = full
+                try:
+                    st = entry.stat()
+                    files[rel] = (entry.path, st.st_size, st.st_mtime)
+                except OSError:
+                    # e.g. a broken symlink with follow_symlinks = true: keep it
+                    # with a size that never matches, so the copy is attempted
+                    # and fails loudly instead of silently dropping the file.
+                    files[rel] = (entry.path, -1, 0.0)
 
-    return dirs, files, links
+    return dirs, files, links, errors
+
+
+def entry_info(entry: os.DirEntry) -> tuple[int, float, bool]:
+    """(size, mtime, is_link) from scandir's cached data."""
+    is_link = entry_is_link(entry)
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return -1, 0.0, is_link
+    return st.st_size, st.st_mtime, is_link
+
+
+def lstat_info(path: Path) -> tuple[int, float, bool] | None:
+    """Same triple for a path we hold no directory entry for, None if absent."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    return st.st_size, st.st_mtime, _stat_is_link(st)
 
 
 def scan_dest(dest: Path, excluded: Matcher, protected: set[str]):
-    """Returns (dirs, entries) present in the destination and manageable."""
+    """Returns (dirs, entries, errors) present in the destination.
+
+    `entries` maps each relative path to (size, mtime, is_link), so the copy
+    phase can decide without stat-ing the destination all over again.
+    """
     dirs: set[str] = set()
-    entries: set[str] = set()
+    entries: dict[str, tuple[int, float, bool]] = {}
+    errors = 0
 
-    for root, dirnames, filenames in os.walk(dest, topdown=True):
-        root_path = Path(root)
-        rel_root = root_path.relative_to(dest)
-        kept: list[str] = []
-        for name in sorted(dirnames):
-            rel = (rel_root / name).as_posix()
-            if rel in protected or excluded(rel, True):
+    stack: list[tuple[str, str]] = [(str(dest), "")]
+    while stack:
+        root, rel_root = stack.pop()
+        listed = _listdir(root, rel_root)
+        if listed is None:
+            errors += 1
+            continue
+
+        prefix = rel_root + "/" if rel_root else ""
+        for entry in listed:
+            rel = prefix + entry.name
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            if rel in protected or excluded(rel, is_dir):
                 continue  # excluded: we leave it alone
-            full = root_path / name
-            if is_link(full):
-                entries.add(rel)  # link to a folder: handled as a single entry
-                continue
-            dirs.add(rel)
-            kept.append(name)
-        dirnames[:] = kept
+            size, mtime, is_link = entry_info(entry)
+            if is_dir and not is_link:
+                dirs.add(rel)
+                stack.append((entry.path, rel))
+            else:
+                # files, and links to either a file or a folder: a link is one
+                # entry, never something we descend into
+                entries[rel] = (size, mtime, is_link)
 
-        for name in sorted(filenames):
-            rel = (rel_root / name).as_posix()
-            if rel in protected or excluded(rel, False):
-                continue
-            entries.add(rel)
-
-    return dirs, entries
+    return dirs, entries, errors
 
 
 # --------------------------------------------------------------------------
 # Synchronization
 # --------------------------------------------------------------------------
 
-def needs_copy(src_file: Path, dst_stat: os.stat_result) -> bool:
-    """True when size or mtime differ; `dst_stat` is the destination lstat."""
-    try:
-        s = src_file.stat()
-    except OSError:
-        return True
-    return s.st_size != dst_stat.st_size or abs(s.st_mtime - dst_stat.st_mtime) > 1
+def needs_copy(size: int, mtime: float, dst_size: int, dst_mtime: float) -> bool:
+    """True when size or mtime differ, within a 1s tolerance on the mtime.
+
+    Both sides come from their own scan, so an up-to-date run performs no stat
+    of its own at all.
+    """
+    return size != dst_size or abs(mtime - dst_mtime) > 1
 
 
 def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
@@ -468,12 +550,12 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         except (ValueError, OSError):
             pass
 
-    src_dirs, src_files, src_links = scan_source(src, excluded, follow)
-    dst_dirs, dst_entries = scan_dest(dest, excluded, protected)
+    src_dirs, src_files, src_links, src_errors = scan_source(src, excluded, follow)
+    dst_dirs, dst_entries, dst_errors = scan_dest(dest, excluded, protected)
 
     wanted_entries = src_files.keys() | src_links.keys()
     stats = {"copied": 0, "updated": 0, "links": 0, "folders": 0,
-             "deleted": 0, "errors": 0}
+             "deleted": 0, "errors": src_errors + dst_errors}
 
     def log(action: str, rel: str) -> None:
         if verbose:
@@ -496,7 +578,7 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         return any(rel == f or rel.startswith(f + "/") for f in failed)
 
     # 1) Deletions (first, to clear file/folder conflicts)
-    for rel in sorted(dst_entries - wanted_entries):
+    for rel in sorted(dst_entries.keys() - wanted_entries):
         target = dest / rel
         log("delete", rel)
         if not dry_run:
@@ -507,7 +589,7 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
                 continue
         stats["deleted"] += 1
 
-    for rel in sorted(dst_dirs - src_dirs, key=depth, reverse=True):
+    for rel in sorted(dst_dirs - src_dirs, key=by_depth, reverse=True):
         target = dest / rel
         log("delete dir", rel)
         if not dry_run:
@@ -522,7 +604,7 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
 
     # 2) Folder creation (empty ones included; scan_dest already told us
     #    which ones exist, so no need to stat them again)
-    for rel in sorted(src_dirs - dst_dirs, key=depth):
+    for rel in sorted(src_dirs - dst_dirs, key=by_depth):
         if blocked(rel):
             continue
         target = dest / rel
@@ -539,15 +621,17 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
     for rel in sorted(src_files):
         if blocked(rel):
             continue
-        source_file = src_files[rel]
+        src_path, src_size, src_mtime = src_files[rel]
         target = dest / rel
-        try:
-            dst_stat = os.lstat(target)
-        except OSError:
-            dst_stat = None
-        dst_is_link = dst_stat is not None and stat.S_ISLNK(dst_stat.st_mode)
-        existed = dst_stat is not None and not dst_is_link
-        if existed and not needs_copy(source_file, dst_stat):
+        info = dst_entries.get(rel)
+        if info is None:
+            # Not seen by the destination scan: absent, a real folder, or
+            # protected. Only reached for entries we are about to write, so
+            # this stat never shows up on an up-to-date run.
+            info = lstat_info(target)
+        dst_is_link = info is not None and info[2]
+        existed = info is not None and not dst_is_link
+        if existed and not needs_copy(src_size, src_mtime, info[0], info[1]):
             continue
         log("update" if existed else "copy", rel)
         if not dry_run:
@@ -555,7 +639,7 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if dst_is_link:
                     target.unlink()
-                shutil.copy2(source_file, target)
+                shutil.copy2(src_path, target)
             except OSError as exc:
                 fail("copy", rel, exc)
                 continue

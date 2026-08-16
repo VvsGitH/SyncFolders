@@ -133,7 +133,8 @@ The order of operations is deliberate:
 2. **Folder creation** — empty ones included, so empty source directories are preserved.
 3. **File copy** via `shutil.copy2` (metadata included). A file is skipped when size and
    modification time match, with a 1-second tolerance on the mtime for filesystems with coarse
-   granularity. Content hashes are not compared.
+   granularity. Content hashes are not compared. Both trees are measured during the initial
+   scan, so a run works on a consistent snapshot.
 4. **Symlinks** recreated as such when `follow_symlinks = false`.
 
 The script itself and the `sync.toml` file are protected: they are never deleted, even when
@@ -156,5 +157,8 @@ In dry-run mode the line is prefixed with `[dry-run]`.
   source nor excluded gets deleted. The first time you use it in a new folder, always run
   `sync -n` to check.
 - File comparison relies on size and mtime, not on content: a change that preserves both is
-  not detected.
+  not detected. Sizes and times are read during the scan, so a file modified while the run is
+  in progress is picked up by the next run.
+- A folder that cannot be read is reported (`! cannot read ...`) and sets the exit code to `1`,
+  but the run continues. Check the summary: deletions still proceed on what was scanned.
 - On Windows, creating symlinks may require developer mode or running as administrator.

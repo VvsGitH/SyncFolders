@@ -61,6 +61,17 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
   on Windows only). Negation (`!pattern`) is **not** supported; adding it means reworking
   `Matcher.__call__` into last-match-wins.
 - `needs_copy()` compares size and mtime with a 1-second tolerance, never content hashes.
+  **Both sides come from their scan**, not from a fresh stat, so an up-to-date run issues no
+  stat of its own. The consequence is deliberate: the run works on a snapshot, and a source
+  file modified mid-run is picked up by the next run, not the current one.
+- The two walkers are `os.scandir` with an explicit stack (not recursion, not `os.walk`), so
+  every entry is classified from the `DirEntry` the OS already handed back. Never reach for
+  `path.lstat()` inside them — `entry_is_link()` / `entry_info()` answer from cached data, free
+  on Windows. Traversal order is meaningless: `sync()` sorts every phase, folders via
+  `by_depth`.
+- `entry_is_link()` also catches Windows junctions and is used on the **destination** side.
+  `scan_source` deliberately uses the plain `entry.is_symlink()`, so a junction in the source
+  stays real content and is copied as a plain folder.
 
 ## Verifying changes
 
