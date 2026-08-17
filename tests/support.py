@@ -146,6 +146,23 @@ def failing_scandir(*bad_paths: Path):
     return unittest.mock.patch("os.scandir", fake)
 
 
+def failing_unlink(*bad_paths: Path):
+    """Patches Path.unlink so removing `bad_paths` raises PermissionError.
+
+    Same reasoning as `failing_scandir`: a real read-only ACL would be
+    platform-specific and could outlive the test.
+    """
+    bad = {str(Path(p)) for p in bad_paths}
+    real = Path.unlink
+
+    def fake(self, missing_ok=False):
+        if str(self) in bad:
+            raise PermissionError(13, "Permission denied")
+        return real(self, missing_ok=missing_ok)
+
+    return unittest.mock.patch.object(Path, "unlink", fake)
+
+
 class TreeCase(unittest.TestCase):
     """Base class giving each test an isolated src/dest pair."""
 

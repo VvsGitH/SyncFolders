@@ -509,9 +509,12 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
 
     # Explicit stack rather than recursion: deep trees must not hit the
     # recursion limit. Traversal order is irrelevant, sync() sorts everything.
-    stack: list[tuple[str, str]] = [(str(src), "")]
+    # The third element is the real (link-free, case-normalised) path of the
+    # folder being listed, carried along only to catch link cycles.
+    stack: list[tuple[str, str, str]] = [
+        (str(src), "", os.path.normcase(os.path.realpath(src)))]
     while stack:
-        root, rel_root = stack.pop()
+        root, rel_root, real_root = stack.pop()
         listed = _listdir(root, rel_root)
         if listed is None:
             errors += 1
@@ -529,10 +532,28 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
             # is_symlink(), not entry_is_link(): a junction in the source stays
             # real content, so it is copied as a plain folder.
             if not follow and entry.is_symlink():
-                links[rel] = os.readlink(entry.path)
+                try:
+                    links[rel] = os.readlink(entry.path)
+                except OSError as exc:
+                    print(f"  ! cannot read the link {rel}: {exc}",
+                          file=sys.stderr)
+                    errors += 1
             elif is_dir:
+                # A folder we descend into through a link may point back at one
+                # of its own ancestors. Following it would walk the same subtree
+                # again and again -- until the path limit, not forever, but long
+                # enough to copy dozens of duplicates into the destination. Only
+                # a link can close a cycle, so only links pay for the realpath.
+                if entry_is_link(entry):
+                    real = os.path.normcase(os.path.realpath(entry.path))
+                    if real_root == real or real_root.startswith(real + os.sep):
+                        print(f"  ! link cycle, skipped: {rel}", file=sys.stderr)
+                        errors += 1
+                        continue
+                else:
+                    real = real_root + os.sep + os.path.normcase(entry.name)
                 dirs.add(rel)
-                stack.append((entry.path, rel))
+                stack.append((entry.path, rel, real))
             else:
                 try:
                     st = entry.stat()
@@ -653,6 +674,19 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         """
         return any(rel == f or rel.startswith(f + "/") for f in failed)
 
+    # Entries that are gone once phase 1 is over. In a dry run nothing is
+    # removed, so this is what lets the preview tell an empty folder from one
+    # that will survive holding excluded or protected entries.
+    removed: set[str] = set()
+
+    def would_survive(rel: str) -> bool:
+        """Dry-run stand-in for the failing rmdir: does anything stay behind?"""
+        try:
+            with os.scandir(dest / rel) as it:
+                return any(rel + "/" + e.name not in removed for e in it)
+        except OSError:
+            return False
+
     # 1) Deletions (first, to clear file/folder conflicts)
     for rel in sorted(dst_entries.keys() - wanted_entries):
         target = dest / rel
@@ -663,19 +697,26 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
             except OSError as exc:
                 fail("delete", rel, exc)
                 continue
+        removed.add(rel)
         stats["deleted"] += 1
 
     for rel in sorted(dst_dirs - src_dirs, key=by_depth, reverse=True):
         target = dest / rel
         log("delete dir", rel)
-        if not dry_run:
+        if dry_run:
+            kept = would_survive(rel)
+        else:
             try:
                 target.rmdir()
+                kept = False
             except OSError:
-                # not empty: it holds excluded or protected entries
-                if verbose:
-                    print(f"  ~ folder not empty, kept: {rel}")
-                continue
+                kept = True
+        if kept:
+            # not empty: it holds excluded or protected entries
+            if verbose:
+                print(f"  ~ folder not empty, kept: {rel}")
+            continue
+        removed.add(rel)
         stats["deleted"] += 1
 
     # 2) Folder creation (empty ones included; scan_dest already told us
@@ -696,6 +737,14 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
     # 3) File copy
     for rel in sorted(src_files):
         if blocked(rel):
+            continue
+        if rel in protected:
+            # The config and the script are spared from the deletion phase;
+            # letting a source file of the same name land on top of them would
+            # give the protection away, replacing the very sync.toml that drives
+            # the run (the next one would then mirror a different source).
+            if verbose:
+                print(f"  ~ protected, not overwritten: {rel}")
             continue
         src_path, src_size, src_mtime = src_files[rel]
         target = dest / rel
@@ -737,11 +786,23 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
     for rel in sorted(src_links):
         if blocked(rel):
             continue
+        if rel in protected:
+            if verbose:
+                print(f"  ~ protected, not overwritten: {rel}")
+            continue
         target = dest / rel
         want = src_links[rel]
         target_is_link = is_link(target)
-        if target_is_link and os.readlink(target) == want:
-            continue
+        if target_is_link:
+            # `is_link` is true for every reparse point, and not all of them
+            # answer readlink (cloud placeholders, app execution aliases): treat
+            # an unreadable one as "not what we want" rather than crashing.
+            try:
+                current = os.readlink(target)
+            except OSError:
+                current = None
+            if current == want:
+                continue
         # A real folder still standing here is one phase 1 could not remove,
         # which only happens when it holds excluded or protected entries:
         # everything else under it was already deleted and the rmdir would
@@ -800,6 +861,9 @@ def main() -> int:
 
     if args.init:
         if config_path.is_file() and not confirm(f"{config_path} already exists. Overwrite?"):
+            # Without a terminal `confirm` declines before printing anything, so
+            # say why nothing happened instead of exiting 0 in silence.
+            print(f"Kept the existing {config_path}.", file=sys.stderr)
             return 0
         create_config(config_path, dest, args.source)
         return 0

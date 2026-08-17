@@ -8,9 +8,9 @@ from pathlib import Path
 
 import sync
 
-from .support import (DIR, TreeCase, build, failing_scandir, make_junction,
-                      needs_junctions, needs_symlinks, operations, snapshot,
-                      summary)
+from .support import (DIR, TreeCase, build, failing_scandir, failing_unlink,
+                      make_junction, needs_junctions, needs_symlinks,
+                      operations, snapshot, summary)
 
 
 class SyncCase(TreeCase):
@@ -145,6 +145,21 @@ class TestProtectedEntries(SyncCase):
         self.run_sync()
         self.assertTrue((self.dest / "sync.toml").exists())
 
+    def test_a_source_file_never_overwrites_the_config(self):
+        """Protection covers the write side too, not only the deletion.
+
+        Mirroring a project that carries its own sync.toml used to replace the
+        one driving the run, so the next run silently mirrored a different
+        source into this folder.
+        """
+        build(self.src, {"sync.toml": 'source = "somewhere else"'})
+        (self.dest / "sync.toml").write_text("source = 'mine'", encoding="utf-8")
+        code = self.run_sync()
+        self.assertEqual(0, code)
+        self.assertEqual("source = 'mine'",
+                         (self.dest / "sync.toml").read_text(encoding="utf-8"))
+        self.assertIn("protected, not overwritten: sync.toml", self.out)
+
     def test_a_config_outside_the_destination_is_not_protected(self):
         # protection is computed relative to dest: a config living elsewhere
         # simply has nothing to protect inside the tree
@@ -180,6 +195,21 @@ class TestDryRun(SyncCase):
         self.run_sync(dry_run=False)
         self.assertEqual(preview, operations(self.out))
 
+    def test_a_folder_that_will_be_kept_is_previewed_as_kept(self):
+        # nothing is deleted during a dry run, so the rmdir that fails in a real
+        # run has to be simulated: otherwise the preview announced a deletion
+        # that never happens and counted it in the summary
+        build(self.src, {"a.txt": "x"})
+        build(self.dest, {"stale/keep.log": "excluded", "empty/": DIR})
+        self.run_sync("*.log", dry_run=True)
+        preview, preview_summary = operations(self.out), summary(self.out)
+        self.assertIn("~ folder not empty, kept: stale", preview)
+
+        self.run_sync("*.log", dry_run=False)
+        self.assertEqual(preview, operations(self.out))
+        self.assertEqual(preview_summary.replace("[dry-run] ", ""),
+                         summary(self.out))
+
 
 class TestStatsAndExitCode(SyncCase):
 
@@ -205,6 +235,27 @@ class TestStatsAndExitCode(SyncCase):
         self.run_sync(verbose=False)
         self.assertEqual([], operations(self.out))
         self.assertIn("Copied 1", self.out)
+
+
+class TestBlockedByAFailedDeletion(SyncCase):
+    """An entry we could not delete must not be written through."""
+
+    def test_nothing_is_written_below_an_undeletable_entry(self):
+        # dest/x is a file the source has as a folder. If the deletion fails,
+        # creating dest/x/ and copying into it would either fail confusingly or,
+        # worse, follow whatever is still standing there.
+        build(self.src, {"x/c.txt": "content", "ok.txt": "unrelated"})
+        build(self.dest, {"x": "cannot be removed"})
+        with failing_unlink(self.dest / "x"), redirect_stderr(io.StringIO()) as err:
+            code = self.run_sync()
+
+        self.assertEqual(1, code)
+        self.assertIn("cannot delete x", err.getvalue())
+        self.assertIn("errors 1", summary(self.out))
+        # the blocked subtree is skipped entirely, the rest still goes through
+        self.assertDest({"x": "cannot be removed", "ok.txt": "unrelated"})
+        self.assertNotIn("create dir x", operations(self.out))
+        self.assertNotIn("copy x/c.txt", operations(self.out))
 
 
 class TestSymlinks(SyncCase):

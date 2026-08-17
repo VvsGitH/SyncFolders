@@ -137,8 +137,8 @@ The order of operations is deliberate:
    scan, so a run works on a consistent snapshot.
 4. **Symlinks** recreated as such when `follow_symlinks = false`.
 
-The script itself and the `sync.toml` file are protected: they are never deleted, even when
-they sit inside the destination folder.
+The script itself and the `sync.toml` file are protected: they are never deleted, and never
+overwritten by a source file of the same name, even when they sit inside the destination folder.
 
 I/O errors do not stop the run: they are printed to `stderr`, counted in the final summary and
 they set the exit code to `1`.
@@ -162,3 +162,6 @@ In dry-run mode the line is prefixed with `[dry-run]`.
 - A folder that cannot be read is reported (`! cannot read ...`) and sets the exit code to `1`,
   but the run continues. Check the summary: deletions still proceed on what was scanned.
 - On Windows, creating symlinks may require developer mode or running as administrator.
+- A link (symlink, or a Windows junction) inside the source that points back at one of its own
+  parents is reported (`! link cycle, skipped: ...`) and not walked into: following it would
+  copy the same subtree over and over.

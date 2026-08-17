@@ -7,7 +7,7 @@ from unittest import mock
 import sync
 
 from .support import (DIR, TreeCase, build, failing_scandir, make_junction,
-                      needs_junctions)
+                      needs_junctions, needs_symlinks)
 
 
 def matcher(*patterns):
@@ -85,6 +85,42 @@ class TestScanSource(TreeCase):
         self.assertIn("j", dirs)
         self.assertIn("j/x.txt", files)
         self.assertEqual({}, links)
+
+    @needs_junctions
+    def test_a_junction_pointing_at_an_ancestor_is_not_walked(self):
+        # the walk used to follow it until the path limit, recording ~60 nested
+        # duplicates of the whole subtree and copying every one of them
+        build(self.src, {"a.txt": "x", "sub/": DIR})
+        make_junction(self.src / "sub" / "loop", self.src)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            dirs, files, _, errors = self.scan()
+        self.assertEqual({"sub"}, dirs)
+        self.assertEqual({"a.txt"}, set(files))
+        self.assertEqual(1, errors)
+        self.assertIn("link cycle, skipped: sub/loop", stderr.getvalue())
+
+    @needs_symlinks
+    def test_a_followed_symlink_cycle_is_not_walked(self):
+        build(self.src, {"a.txt": "x", "sub/": DIR})
+        (self.src / "sub" / "loop").symlink_to(self.src, target_is_directory=True)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            dirs, files, _, errors = self.scan(follow=True)
+        self.assertEqual({"sub"}, dirs)
+        self.assertEqual({"a.txt"}, set(files))
+        self.assertEqual(1, errors)
+
+    @needs_symlinks
+    def test_a_symlink_to_a_sibling_folder_is_still_followed(self):
+        # the cycle guard must only reject ancestors, not every link
+        build(self.src, {"real/x.txt": "content", "sub/": DIR})
+        (self.src / "sub" / "alias").symlink_to(self.src / "real",
+                                                target_is_directory=True)
+        dirs, files, _, errors = self.scan(follow=True)
+        self.assertEqual(0, errors)
+        self.assertIn("sub/alias", dirs)
+        self.assertIn("sub/alias/x.txt", files)
 
 
 class TestScanDest(TreeCase):
