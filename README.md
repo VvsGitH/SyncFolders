@@ -159,9 +159,13 @@ In dry-run mode the line is prefixed with `[dry-run]`.
 - File comparison relies on size and mtime, not on content: a change that preserves both is
   not detected. Sizes and times are read during the scan, so a file modified while the run is
   in progress is picked up by the next run.
-- A folder that cannot be read is reported (`! cannot read ...`) and sets the exit code to `1`,
-  but the run continues. Check the summary: deletions still proceed on what was scanned.
+- A source folder that cannot be read is reported (`! cannot read ...`) and sets the exit code
+  to `1`, but the run continues. **Nothing is deleted underneath it**: an empty scan there means
+  "could not look", not "not there", and the destination copy is left exactly as it stands
+  (`~ source not scanned, kept: ...`). The mirror is then incomplete — stale in that subtree —
+  which the exit code tells you; re-run once the folder is readable again.
 - On Windows, creating symlinks may require developer mode or running as administrator.
 - A link (symlink, or a Windows junction) inside the source that points back at one of its own
   parents is reported (`! link cycle, skipped: ...`) and not walked into: following it would
-  copy the same subtree over and over.
+  copy the same subtree over and over. As with an unreadable folder, the destination copy of
+  that subtree is kept rather than deleted.

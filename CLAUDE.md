@@ -67,6 +67,12 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
 
   A real folder surviving into phase 3 or 4 always means phase 1 could not remove it: everything
   else under it was already deleted, so the `rmdir` would have succeeded.
+- **A deletion is only legal where the source was actually read.** `scan_source()` returns an
+  `unscanned` set — folders whose `scandir` failed (the root as `""`) and link cycles it refused
+  to walk — and phase 1 skips every destination entry under it. "Absent from the source" and
+  "we could not look" produce the same empty scan, and acting on the second wipes files the
+  source still holds: the source stays intact, so the destination copy is the only one lost.
+  Any new source-side reason to stop walking must join that set.
 - `_parse()` + `_translate()` + `_build_regex()` implement `.gitignore` semantics by hand
   (anchoring, `dir_only`, `IGNORECASE` on Windows only). `Matcher` then short-circuits the
   common shapes: an unanchored pattern with no metacharacters is a set lookup on the last path
@@ -103,7 +109,7 @@ python -m unittest discover -s tests -t . -v
 ```
 
 `-t .` puts the root on `sys.path`, which is what lets the tests `import sync` with no install
-step. ~145 tests, ~25s — most of it is the e2e module spawning real subprocesses. On Windows
+step. ~155 tests, ~25s — most of it is the e2e module spawning real subprocesses. On Windows
 one case-sensitivity test skips; the symlink tests skip too unless developer mode is on.
 
 **Keep it green.** The suite was written against the behaviour as of `b5a83c0`, deliberately

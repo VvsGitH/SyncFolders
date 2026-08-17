@@ -258,6 +258,74 @@ class TestBlockedByAFailedDeletion(SyncCase):
         self.assertNotIn("copy x/c.txt", operations(self.out))
 
 
+class TestUnscannedSource(SyncCase):
+    """A source folder we could not list must not cause any deletion.
+
+    "Missing from the source" and "we could not look" produce the same empty
+    scan, and only the second one must never be acted on: the source is intact,
+    so deleting the destination copies loses the only affected replica.
+    """
+
+    def test_the_destination_copy_survives_an_unreadable_source_folder(self):
+        build(self.src, {"docs/": DIR, "top.txt": "x"})
+        build(self.dest, {"docs/important.txt": "irreplaceable",
+                          "docs/deep/also.txt": "irreplaceable too"})
+        with failing_scandir(self.src / "docs"), \
+                redirect_stderr(io.StringIO()) as err:
+            code = self.run_sync()
+
+        self.assertEqual(1, code)
+        self.assertIn("cannot read docs", err.getvalue())
+        self.assertDest({"top.txt": "x", "docs/": DIR,
+                         "docs/important.txt": "irreplaceable",
+                         "docs/deep/": DIR,
+                         "docs/deep/also.txt": "irreplaceable too"})
+        self.assertIn("~ source not scanned, kept: docs/important.txt",
+                      operations(self.out))
+        self.assertIn("deleted 0", summary(self.out))
+
+    def test_an_unreadable_root_deletes_nothing_at_all(self):
+        # the worst case: the whole scan comes back empty, and the mirror used
+        # to read that as "the source is empty, wipe the destination"
+        build(self.dest, {"a.txt": "keep", "sub/b.txt": "keep too"})
+        with failing_scandir(self.src), redirect_stderr(io.StringIO()):
+            code = self.run_sync()
+
+        self.assertEqual(1, code)
+        self.assertDest({"a.txt": "keep", "sub/": DIR, "sub/b.txt": "keep too"})
+        self.assertIn("deleted 0", summary(self.out))
+
+    def test_the_rest_of_the_mirror_still_syncs(self):
+        # the guard is scoped to the unscanned subtree, not the whole run
+        build(self.src, {"docs/": DIR, "new.txt": "fresh"})
+        build(self.dest, {"docs/keep.txt": "x", "stale.txt": "old"})
+        with failing_scandir(self.src / "docs"), redirect_stderr(io.StringIO()):
+            self.run_sync()
+        self.assertDest({"docs/": DIR, "docs/keep.txt": "x",
+                         "new.txt": "fresh"})
+        self.assertIn("delete stale.txt", operations(self.out))
+
+    def test_a_dry_run_previews_the_same_restraint(self):
+        build(self.src, {"docs/": DIR})
+        build(self.dest, {"docs/important.txt": "x"})
+        with failing_scandir(self.src / "docs"), redirect_stderr(io.StringIO()):
+            self.run_sync(dry_run=True)
+        self.assertNotIn("delete docs/important.txt", operations(self.out))
+        self.assertIn("deleted 0", summary(self.out))
+
+    @needs_junctions
+    def test_a_skipped_link_cycle_deletes_nothing_either(self):
+        # the cycle guard leaves the subtree unwalked, which is the same
+        # situation: unverified, not superfluous
+        build(self.src, {"sub/": DIR})
+        make_junction(self.src / "sub" / "loop", self.src)
+        build(self.dest, {"sub/loop/old.txt": "was mirrored before"})
+        with redirect_stderr(io.StringIO()):
+            self.run_sync()
+        self.assertEqual("was mirrored before",
+                         (self.dest / "sub/loop/old.txt").read_text())
+
+
 class TestSymlinks(SyncCase):
     """follow_symlinks = false: links are recreated, not followed."""
 

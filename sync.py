@@ -497,14 +497,19 @@ def _listdir(root: str, rel: str) -> list[os.DirEntry] | None:
 
 
 def scan_source(src: Path, excluded: Matcher, follow: bool):
-    """Returns (dirs, files, links, errors) keyed by relative posix paths.
+    """Returns (dirs, files, links, errors, unscanned), keyed by relative posix paths.
 
     `files` maps to (path, size, mtime), all captured during the scan, so the
     copy phase needs no further stat on the source.
+
+    `unscanned` holds the folders the walk could not list (the root itself as
+    `""`). What lives under them is unknown, not absent, and `sync()` needs to
+    tell the two apart before it deletes anything.
     """
     dirs: set[str] = set()
     files: dict[str, tuple[str, int, float]] = {}
     links: dict[str, str] = {}
+    unscanned: set[str] = set()
     errors = 0
 
     # Explicit stack rather than recursion: deep trees must not hit the
@@ -517,6 +522,7 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
         root, rel_root, real_root = stack.pop()
         listed = _listdir(root, rel_root)
         if listed is None:
+            unscanned.add(rel_root)
             errors += 1
             continue
 
@@ -548,6 +554,9 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
                     real = os.path.normcase(os.path.realpath(entry.path))
                     if real_root == real or real_root.startswith(real + os.sep):
                         print(f"  ! link cycle, skipped: {rel}", file=sys.stderr)
+                        # not walked, so the same rule as an unreadable folder:
+                        # the destination copy is unverified, not superfluous
+                        unscanned.add(rel)
                         errors += 1
                         continue
                 else:
@@ -564,7 +573,7 @@ def scan_source(src: Path, excluded: Matcher, follow: bool):
                     # and fails loudly instead of silently dropping the file.
                     files[rel] = (entry.path, -1, 0.0)
 
-    return dirs, files, links, errors
+    return dirs, files, links, errors, unscanned
 
 
 def entry_info(entry: os.DirEntry) -> tuple[int, float, bool]:
@@ -647,7 +656,8 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         except (ValueError, OSError):
             pass
 
-    src_dirs, src_files, src_links, src_errors = scan_source(src, excluded, follow)
+    src_dirs, src_files, src_links, src_errors, unscanned = \
+        scan_source(src, excluded, follow)
     dst_dirs, dst_entries, dst_errors = scan_dest(dest, excluded, protected)
 
     wanted_entries = src_files.keys() | src_links.keys()
@@ -674,6 +684,24 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         """
         return any(rel == f or rel.startswith(f + "/") for f in failed)
 
+    def unverified(rel: str) -> bool:
+        """True when `rel` sits under a source folder the scan never listed.
+
+        Absent from `src_files` then means "we could not look", not "it is not
+        there". Deleting on that basis would wipe the destination copies of
+        files that are still perfectly present in the source, which is the one
+        mistake a mirror must never make: the source is intact, the destination
+        is not, and nothing brings it back. So the whole subtree is left as it
+        stands -- stale at worst -- and the run exits 1 to say the mirror is
+        incomplete.
+        """
+        return any(u == "" or rel == u or rel.startswith(u + "/")
+                   for u in unscanned)
+
+    def keep_unverified(rel: str) -> None:
+        if verbose:
+            print(f"  ~ source not scanned, kept: {rel}")
+
     # Entries that are gone once phase 1 is over. In a dry run nothing is
     # removed, so this is what lets the preview tell an empty folder from one
     # that will survive holding excluded or protected entries.
@@ -689,6 +717,9 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
 
     # 1) Deletions (first, to clear file/folder conflicts)
     for rel in sorted(dst_entries.keys() - wanted_entries):
+        if unverified(rel):
+            keep_unverified(rel)
+            continue
         target = dest / rel
         log("delete", rel)
         if not dry_run:
@@ -701,6 +732,9 @@ def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
         stats["deleted"] += 1
 
     for rel in sorted(dst_dirs - src_dirs, key=by_depth, reverse=True):
+        if unverified(rel):
+            keep_unverified(rel)
+            continue
         target = dest / rel
         log("delete dir", rel)
         if dry_run:

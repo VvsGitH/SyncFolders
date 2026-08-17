@@ -21,7 +21,7 @@ class TestScanSource(TreeCase):
 
     def test_records_files_with_size_and_time(self):
         build(self.src, {"a.txt": "hello"})
-        dirs, files, links, errors = self.scan()
+        dirs, files, links, errors, _ = self.scan()
         self.assertEqual(set(), dirs)
         self.assertEqual({"a.txt"}, set(files))
         path, size, mtime = files["a.txt"]
@@ -32,29 +32,29 @@ class TestScanSource(TreeCase):
 
     def test_records_nested_paths_as_posix(self):
         build(self.src, {"a/b/c.txt": "x"})
-        _, files, _, _ = self.scan()
+        _, files, _, _, _ = self.scan()
         self.assertEqual({"a/b/c.txt"}, set(files))
 
     def test_keeps_empty_directories(self):
         build(self.src, {"empty/": DIR})
-        dirs, files, _, _ = self.scan()
+        dirs, files, _, _, _ = self.scan()
         self.assertEqual({"empty"}, dirs)
         self.assertEqual({}, files)
 
     def test_excluded_file_is_skipped(self):
         build(self.src, {"a.txt": "x", "b.log": "x"})
-        _, files, _, _ = self.scan("*.log")
+        _, files, _, _, _ = self.scan("*.log")
         self.assertEqual({"a.txt"}, set(files))
 
     def test_excluded_directory_is_never_walked_into(self):
         build(self.src, {"node_modules/deep/x.txt": "x", "keep.txt": "y"})
-        dirs, files, _, _ = self.scan("node_modules/")
+        dirs, files, _, _, _ = self.scan("node_modules/")
         self.assertEqual({"keep.txt"}, set(files))
         self.assertEqual(set(), dirs)
 
     def test_dir_only_pattern_leaves_a_file_of_that_name_alone(self):
         build(self.src, {"pkg.egg-info/x.txt": "x", "f.egg-info": "keep me"})
-        dirs, files, _, _ = self.scan("*.egg-info/")
+        dirs, files, _, _, _ = self.scan("*.egg-info/")
         self.assertEqual({"f.egg-info"}, set(files))
         self.assertEqual(set(), dirs)
 
@@ -62,7 +62,7 @@ class TestScanSource(TreeCase):
         build(self.src, {"good/a.txt": "x", "bad/b.txt": "y"})
         stderr = io.StringIO()
         with failing_scandir(self.src / "bad"), mock.patch("sys.stderr", stderr):
-            _, files, _, errors = self.scan()
+            _, files, _, errors, _ = self.scan()
         self.assertEqual(1, errors)
         self.assertIn("cannot read bad", stderr.getvalue())
         self.assertEqual({"good/a.txt"}, set(files))
@@ -70,7 +70,7 @@ class TestScanSource(TreeCase):
     def test_unreadable_root_reports_the_dot(self):
         stderr = io.StringIO()
         with failing_scandir(self.src), mock.patch("sys.stderr", stderr):
-            _, files, _, errors = self.scan()
+            _, files, _, errors, _ = self.scan()
         self.assertEqual(1, errors)
         self.assertIn("cannot read .", stderr.getvalue())
         self.assertEqual({}, files)
@@ -81,7 +81,7 @@ class TestScanSource(TreeCase):
         # content to copy, and recreating it as a link would need admin rights
         build(self.tmp, {"outside/x.txt": "from outside"})
         make_junction(self.src / "j", self.tmp / "outside")
-        dirs, files, links, _ = self.scan()
+        dirs, files, links, _, _ = self.scan()
         self.assertIn("j", dirs)
         self.assertIn("j/x.txt", files)
         self.assertEqual({}, links)
@@ -94,7 +94,7 @@ class TestScanSource(TreeCase):
         make_junction(self.src / "sub" / "loop", self.src)
         stderr = io.StringIO()
         with mock.patch("sys.stderr", stderr):
-            dirs, files, _, errors = self.scan()
+            dirs, files, _, errors, _ = self.scan()
         self.assertEqual({"sub"}, dirs)
         self.assertEqual({"a.txt"}, set(files))
         self.assertEqual(1, errors)
@@ -106,7 +106,7 @@ class TestScanSource(TreeCase):
         (self.src / "sub" / "loop").symlink_to(self.src, target_is_directory=True)
         stderr = io.StringIO()
         with mock.patch("sys.stderr", stderr):
-            dirs, files, _, errors = self.scan(follow=True)
+            dirs, files, _, errors, _ = self.scan(follow=True)
         self.assertEqual({"sub"}, dirs)
         self.assertEqual({"a.txt"}, set(files))
         self.assertEqual(1, errors)
@@ -117,7 +117,7 @@ class TestScanSource(TreeCase):
         build(self.src, {"real/x.txt": "content", "sub/": DIR})
         (self.src / "sub" / "alias").symlink_to(self.src / "real",
                                                 target_is_directory=True)
-        dirs, files, _, errors = self.scan(follow=True)
+        dirs, files, _, errors, _ = self.scan(follow=True)
         self.assertEqual(0, errors)
         self.assertIn("sub/alias", dirs)
         self.assertIn("sub/alias/x.txt", files)
