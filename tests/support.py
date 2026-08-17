@@ -14,7 +14,7 @@ import unittest.mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SYNC_PY = REPO_ROOT / "sync.py"
+SRC = REPO_ROOT / "src"
 
 DIR = None  # value marking a directory entry in a tree spec
 
@@ -73,9 +73,13 @@ def _is_reparse(path: Path) -> bool:
 
 
 def run_cli(cwd: Path, *args: str, stdin: str = "") -> subprocess.CompletedProcess:
-    """Runs sync.py as a real subprocess, the way a user would."""
+    """Runs the CLI as a real subprocess, the way a user would.
+
+    `python src` executes src/__main__.py with src as sys.path[0], exactly like
+    running the built sync.pyz, so no build step is needed to exercise the CLI.
+    """
     return subprocess.run(
-        [sys.executable, str(SYNC_PY), *args],
+        [sys.executable, str(SRC), *args],
         cwd=str(cwd), input=stdin, capture_output=True, text=True,
     )
 

@@ -9,7 +9,8 @@ pattern/path/kind combination.
 import os
 import unittest
 
-import sync
+import config
+import matching
 
 
 class ReferenceMatcher:
@@ -18,11 +19,11 @@ class ReferenceMatcher:
     def __init__(self, patterns):
         self._rules = []
         for pattern in patterns:
-            parsed = sync._parse(pattern)
+            parsed = matching._parse(pattern)
             if parsed is None:
                 continue
             body, dir_only, anchored = parsed
-            self._rules.append((sync._build_regex(body, anchored), dir_only))
+            self._rules.append((matching._build_regex(body, anchored), dir_only))
 
     def __call__(self, rel, is_dir):
         for regex, dir_only in self._rules:
@@ -33,7 +34,7 @@ class ReferenceMatcher:
         return False
 
 
-DEFAULT_PATTERNS = [p for _, group in sync.DEFAULT_EXCLUDES for p in group]
+DEFAULT_PATTERNS = [p for _, group in config.DEFAULT_EXCLUDES for p in group]
 
 ADVERSARIAL_PATTERNS = [
     "/bin", "/bin/", "a/b", "a/b/", "**/x", "x/**", "a/**/b",
@@ -66,11 +67,11 @@ class TestPatternSemantics(unittest.TestCase):
     """The syntax table documented in README.md."""
 
     def assertMatch(self, pattern, rel, is_dir=False):
-        self.assertTrue(sync.Matcher([pattern])(rel, is_dir),
+        self.assertTrue(matching.Matcher([pattern])(rel, is_dir),
                         f"{pattern!r} should match {rel!r} (is_dir={is_dir})")
 
     def assertNoMatch(self, pattern, rel, is_dir=False):
-        self.assertFalse(sync.Matcher([pattern])(rel, is_dir),
+        self.assertFalse(matching.Matcher([pattern])(rel, is_dir),
                          f"{pattern!r} should not match {rel!r} (is_dir={is_dir})")
 
     def test_bare_name_matches_at_any_depth(self):
@@ -123,7 +124,7 @@ class TestPatternSemantics(unittest.TestCase):
     def test_blank_lines_and_comments_are_ignored(self):
         for pattern in ("", "   ", "#comment", "# spaced", "/"):
             with self.subTest(pattern=pattern):
-                matcher = sync.Matcher([pattern])
+                matcher = matching.Matcher([pattern])
                 self.assertFalse(matcher("anything", False))
                 self.assertFalse(matcher("anything", True))
 
@@ -144,7 +145,7 @@ class TestDefaultExcludes(unittest.TestCase):
     """The shipped exclude list, as users actually meet it."""
 
     def setUp(self):
-        self.matcher = sync.Matcher(DEFAULT_PATTERNS)
+        self.matcher = matching.Matcher(DEFAULT_PATTERNS)
 
     def test_dependency_and_vcs_folders_are_excluded(self):
         for name in ("node_modules", ".git", "dist", "build", "__pycache__",
@@ -173,7 +174,7 @@ class TestFastPathEquivalence(unittest.TestCase):
     """The fast path must be indistinguishable from the regex loop."""
 
     def assertSameAsReference(self, patterns):
-        fast = sync.Matcher(patterns)
+        fast = matching.Matcher(patterns)
         ref = ReferenceMatcher(patterns)
         for rel in PATHS:
             for is_dir in (True, False):
@@ -201,12 +202,12 @@ class TestFastPathCoverage(unittest.TestCase):
     """Equality proves nothing if the fast path is never taken."""
 
     def test_defaults_need_no_regex_at_all(self):
-        m = sync.Matcher(DEFAULT_PATTERNS)
+        m = matching.Matcher(DEFAULT_PATTERNS)
         self.assertEqual([], m._re_any)
         self.assertEqual([], m._re_dir)
 
     def test_defaults_populate_every_bucket(self):
-        m = sync.Matcher(DEFAULT_PATTERNS)
+        m = matching.Matcher(DEFAULT_PATTERNS)
         self.assertTrue(m._lit_any)
         self.assertTrue(m._lit_dir)
         self.assertTrue(m._suf_any)
@@ -215,14 +216,14 @@ class TestFastPathCoverage(unittest.TestCase):
     def test_real_globs_still_become_regexes(self):
         for pattern in ("a/b*/c", "?abc", "[ab]c", "a/**/b", "/bin"):
             with self.subTest(pattern=pattern):
-                m = sync.Matcher([pattern])
+                m = matching.Matcher([pattern])
                 self.assertTrue(m._re_any or m._re_dir,
                                 f"{pattern!r} was wrongly taken as a fast rule")
 
     @unittest.skipUnless(WINDOWS, "the ASCII guard only applies when folding")
     def test_non_ascii_falls_back_to_regex_on_windows(self):
         # str.lower() does not reproduce re.IGNORECASE's Unicode case folding
-        m = sync.Matcher(["café/"])
+        m = matching.Matcher(["café/"])
         self.assertTrue(m._re_dir)
 
 

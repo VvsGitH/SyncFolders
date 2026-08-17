@@ -5,7 +5,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-import sync
+import config
 
 from .support import DIR, TreeCase, build
 
@@ -21,7 +21,7 @@ def tty(answers=()):
 class TestRenderConfig(unittest.TestCase):
 
     def setUp(self):
-        self.text = sync.render_config(r"C:\some\source")
+        self.text = config.render_config(r"C:\some\source")
         self.data = tomllib.loads(self.text)
 
     def test_is_valid_toml(self):
@@ -34,11 +34,11 @@ class TestRenderConfig(unittest.TestCase):
         self.assertIs(False, self.data["follow_symlinks"])
 
     def test_contains_every_default_exclusion(self):
-        expected = [p for _, group in sync.DEFAULT_EXCLUDES for p in group]
+        expected = [p for _, group in config.DEFAULT_EXCLUDES for p in group]
         self.assertEqual(sorted(expected), sorted(self.data["exclude"]))
 
     def test_keeps_the_explanatory_comments(self):
-        for _, comment in [(0, c) for c, _ in sync.DEFAULT_EXCLUDES]:
+        for _, comment in [(0, c) for c, _ in config.DEFAULT_EXCLUDES]:
             self.assertIn(comment, self.text)
 
 
@@ -47,7 +47,7 @@ class TestLoadConfig(TreeCase):
     def load(self, body: str):
         path = self.dest / "sync.toml"
         path.write_text(body, encoding="utf-8")
-        return sync.load_config(path, self.dest)
+        return config.load_config(path, self.dest)
 
     def assertRejects(self, body: str, fragment: str):
         with self.assertRaises(SystemExit) as caught:
@@ -114,7 +114,7 @@ class TestLoadConfig(TreeCase):
 
     def test_rejects_an_unreadable_config(self):
         with self.assertRaises(SystemExit) as caught:
-            sync.load_config(self.dest / "missing.toml", self.dest)
+            config.load_config(self.dest / "missing.toml", self.dest)
         self.assertIn("cannot read", str(caught.exception))
 
 
@@ -123,24 +123,24 @@ class TestCreateConfig(TreeCase):
     def test_writes_a_loadable_config_from_an_explicit_source(self):
         path = self.dest / "sync.toml"
         with mock.patch("sys.stdout", new=io.StringIO()):
-            sync.create_config(path, self.dest, str(self.src))
-        src, _, _ = sync.load_config(path, self.dest)
+            config.create_config(path, self.dest, str(self.src))
+        src, _, _ = config.load_config(path, self.dest)
         self.assertEqual(self.src, src)
 
     def test_resolves_a_relative_source_against_the_destination(self):
         build(self.tmp, {"other/": DIR})
         path = self.dest / "sync.toml"
         with mock.patch("sys.stdout", new=io.StringIO()):
-            sync.create_config(path, self.dest, "../other")
+            config.create_config(path, self.dest, "../other")
         self.assertEqual(self.tmp / "other",
-                         sync.load_config(path, self.dest)[0])
+                         config.load_config(path, self.dest)[0])
 
     def test_asks_when_no_source_is_given(self):
         path = self.dest / "sync.toml"
         stdin_patch, input_patch = tty([str(self.src)])
         with stdin_patch, input_patch, mock.patch("sys.stdout", new=io.StringIO()):
-            sync.create_config(path, self.dest, None)
-        self.assertEqual(self.src, sync.load_config(path, self.dest)[0])
+            config.create_config(path, self.dest, None)
+        self.assertEqual(self.src, config.load_config(path, self.dest)[0])
 
 
 class TestAskSource(TreeCase):
@@ -148,7 +148,7 @@ class TestAskSource(TreeCase):
     def ask(self, answers):
         stdin_patch, input_patch = tty(answers)
         with stdin_patch, input_patch, mock.patch("sys.stdout", new=io.StringIO()):
-            return sync.ask_source(self.dest)
+            return config.ask_source(self.dest)
 
     def test_accepts_a_valid_folder(self):
         self.assertEqual(str(self.src), self.ask([str(self.src)]))
@@ -175,12 +175,12 @@ class TestAskSource(TreeCase):
                 mock.patch("builtins.input", side_effect=EOFError), \
                 mock.patch("sys.stdout", new=io.StringIO()):
             with self.assertRaises(SystemExit):
-                sync.ask_source(self.dest)
+                config.ask_source(self.dest)
 
     def test_refuses_to_prompt_without_a_terminal(self):
         with mock.patch("sys.stdin", new=io.StringIO()):
             with self.assertRaises(SystemExit) as caught:
-                sync.ask_source(self.dest)
+                config.ask_source(self.dest)
         self.assertIn("--source", str(caught.exception))
 
 
@@ -189,7 +189,7 @@ class TestConfirm(unittest.TestCase):
     def answer(self, text):
         stdin_patch, input_patch = tty([text])
         with stdin_patch, input_patch:
-            return sync.confirm("Proceed?")
+            return config.confirm("Proceed?")
 
     def test_accepts_y_and_yes(self):
         self.assertTrue(self.answer("y"))
@@ -203,14 +203,14 @@ class TestConfirm(unittest.TestCase):
 
     def test_is_false_without_a_terminal(self):
         with mock.patch("sys.stdin", new=io.StringIO()):
-            self.assertFalse(sync.confirm("Proceed?"))
+            self.assertFalse(config.confirm("Proceed?"))
 
     def test_is_false_on_end_of_input(self):
         stdin = mock.MagicMock()
         stdin.isatty.return_value = True
         with mock.patch("sys.stdin", stdin), \
                 mock.patch("builtins.input", side_effect=KeyboardInterrupt):
-            self.assertFalse(sync.confirm("Proceed?"))
+            self.assertFalse(config.confirm("Proceed?"))
 
 
 if __name__ == "__main__":

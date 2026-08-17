@@ -1,6 +1,7 @@
 # sync
 
-A single-file CLI that **mirrors a source folder into the current folder**.
+A CLI that **mirrors a source folder into the current folder**, shipped as a single executable
+file.
 
 One-way mirror: when it finishes, the destination is an exact copy of the source, minus the
 exclusions. This is not a merge — files present in the destination but not in the source are
@@ -10,19 +11,25 @@ Standard library only, no dependencies. Requires **Python 3.11+** (the `tomllib`
 
 ## Installation
 
-Copy `sync.py` and `sync.bat` into the same folder, inside a directory on the Windows `PATH`.
-From then on `sync` can be invoked from any directory: the destination is always the folder
-the terminal is currently in.
+Build first — no dependencies, no toolchain, just the standard library:
+
+```
+python build.py
+```
+
+That writes `dist/sync.pyz` (a Python zipapp: the whole tool in one file) and `dist/sync.bat`.
+Put `dist/` on the Windows `PATH`, or copy those two files into a folder already on it. From
+then on `sync` can be invoked from any directory: the destination is always the folder the
+terminal is currently in.
 
 `sync.bat` is a thin wrapper: it prefers the `py -3` launcher and falls back to `python` when
 the launcher is not available.
 
-On Linux/macOS the `.bat` is not needed: make `sync.py` executable (it already carries the
-shebang) and link it into a folder on the `PATH`.
+On Linux/macOS the `.bat` is not needed: the archive carries a shebang and the build marks it
+executable, so it only needs to be reachable from the `PATH`.
 
 ```sh
-chmod +x sync.py
-ln -s "$PWD/sync.py" ~/.local/bin/sync
+ln -s "$PWD/dist/sync.pyz" ~/.local/bin/sync
 ```
 
 ## Usage
@@ -137,8 +144,10 @@ The order of operations is deliberate:
    scan, so a run works on a consistent snapshot.
 4. **Symlinks** recreated as such when `follow_symlinks = false`.
 
-The script itself and the `sync.toml` file are protected: they are never deleted, and never
-overwritten by a source file of the same name, even when they sit inside the destination folder.
+The tool's own files (`sync.pyz` and the `sync.bat` next to it) and the `sync.toml` file are
+protected: they are never deleted, and never overwritten by a source file of the same name, even
+when they sit inside the destination folder — which is exactly what happens when you run `sync`
+inside the folder you installed it in.
 
 I/O errors do not stop the run: they are printed to `stderr`, counted in the final summary and
 they set the exit code to `1`.

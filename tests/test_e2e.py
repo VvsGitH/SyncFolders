@@ -9,10 +9,10 @@ import subprocess
 import sys
 import unittest
 
-import sync
+from build import build as build_dist
 
-from .support import (DIR, SYNC_PY, TreeCase, build, make_junction,
-                      needs_junctions, operations, run_cli, snapshot, summary)
+from .support import (DIR, TreeCase, build, make_junction, needs_junctions,
+                      operations, run_cli, snapshot, summary)
 
 
 class CliCase(TreeCase):
@@ -113,18 +113,25 @@ class TestProtectedEntries(CliCase):
         self.sync("-y")
         self.assertTrue((self.dest / "sync.toml").is_file())
 
-    def test_the_script_deletes_everything_but_itself(self):
-        # the case the protection exists for: sync.py sitting in the folder
-        # it is mirroring into
+    def test_the_installed_tool_deletes_everything_but_itself(self):
+        # the case the protection exists for: the dist folder on the PATH being
+        # the folder the tool is mirroring into. Both files must survive -- the
+        # wrapper too, or the next `sync` has nothing to launch.
         build(self.src, {"a.txt": "x"})
-        local_script = self.dest / "sync.py"
-        shutil.copy2(SYNC_PY, local_script)
+        app = build_dist(self.tmp / "dist")
+        local_app = self.dest / app.name
+        local_bat = self.dest / "sync.bat"
+        shutil.copy2(app, local_app)
+        shutil.copy2(app.with_name("sync.bat"), local_bat)
         run_cli(self.dest, "--init", "--source", str(self.src))
-        result = subprocess.run([sys.executable, str(local_script), "-y"],
+        result = subprocess.run([sys.executable, str(local_app), "-y"],
                                 cwd=str(self.dest), capture_output=True, text=True)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertTrue(local_script.is_file(),
-                        "sync.py deleted itself while mirroring")
+        self.assertTrue(local_app.is_file(),
+                        "sync.pyz deleted itself while mirroring")
+        self.assertTrue(local_bat.is_file(),
+                        "sync.bat, the wrapper that launched the run, was deleted")
+        self.assertIn("a.txt", snapshot(self.dest))  # the mirror still happened
 
 
 class TestConfigErrors(CliCase):

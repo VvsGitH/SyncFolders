@@ -4,30 +4,36 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-`sync` is a single-file CLI that mirrors a source folder into the current working directory.
-One-way mirror, not a merge: files in the destination that are not in the source (and not
-excluded) get **deleted**. Read `README.md` for the user-facing behavior — do not duplicate
-that content here.
+`sync` is a CLI that mirrors a source folder into the current working directory. One-way
+mirror, not a merge: files in the destination that are not in the source (and not excluded) get
+**deleted**. Read `README.md` for the user-facing behavior — do not duplicate that content here.
 
 ## Layout
 
 | File | Role |
 | --- | --- |
-| `sync.py` | The entire tool. All logic lives here. |
-| `sync.bat` | Windows wrapper; prefers the `py -3` launcher, falls back to `python`. |
-| `tests/` | Unit and end-to-end suite. Not shipped: `sync.py` + `sync.bat` are what goes on the `PATH`. |
+| `src/matching.py` | Glob matching, `.gitignore` style. |
+| `src/paths.py` | Link detection, path resolution, sort keys, `launcher_paths()`. |
+| `src/config.py` | `sync.toml`: constants, template, interactive setup, loading. |
+| `src/scanning.py` | The two walkers, `scan_source` and `scan_dest`. |
+| `src/syncing.py` | `sync()`: the four phases. |
+| `src/cli.py` | Argument parsing and `main()`. |
+| `src/__main__.py` | Entry point of the zipapp, and of `python src`. |
+| `build.py` | Generates `dist/sync.pyz` + `dist/sync.bat`. The whole toolchain. |
+| `tests/` | Unit and end-to-end suite. Not shipped. |
 | `README.md` | User documentation. |
 
-`sync.py` is organized in commented sections: glob matching, interactive config setup, config
-loading, scanning, synchronization, `main()`. Keep new code inside the matching section.
+`src/` is the archive root, so the modules are **flat and imported absolutely**
+(`from matching import Matcher`), never as a package with relative imports. Keep new code inside
+the module that matches it.
 
 ## Hard constraints
 
-- **Standard library only.** No dependencies, ever — the tool is meant to be dropped onto the
-  `PATH` as two files. Do not add a `requirements.txt`, a `pyproject.toml`, or a package layout
-  unless explicitly asked.
-- **Single file.** `sync.py` must stay self-contained and directly runnable; do not split it
-  into modules.
+- **Standard library only.** No dependencies, ever — `python build.py` must remain the entire
+  build. Do not add a `requirements.txt`, a `pyproject.toml`, or a packaging layout unless
+  explicitly asked.
+- **One file on the `PATH`.** What gets installed is `dist/sync.pyz` plus its `.bat` wrapper,
+  both generated. Nothing in `dist/` is edited by hand, and `dist/` is gitignored.
 - **Python 3.11+** is the floor (`tomllib`). Native `str | None` / `list[tuple[...]]` hints are
   used directly; no `from __future__ import annotations` is needed at that floor.
 - **Everything in English**: code, comments, docstrings, CLI output, config template, docs.
@@ -51,9 +57,19 @@ loading, scanning, synchronization, `main()`. Keep new code inside the matching 
 - **Operation order in `sync()`** is deliberate: deletions → folder creation → file copy →
   symlinks. Deleting first clears file/folder conflicts. Folders are deleted deepest-first and
   created shallowest-first. Do not reorder.
-- **`protected`** holds `SCRIPT_PATH` and the config file, relative to the destination. It is
-  what stops the tool from deleting itself or its own `sync.toml`. Any new deletion path must
-  honor it.
+- **`protected`** holds what `launcher_paths()` returns plus the config file, relative to the
+  destination. It is what stops the tool from deleting itself, its wrapper, or its own
+  `sync.toml`. Any new deletion path must honor it.
+- **`launcher_paths()` reads `sys.argv[0]`, and it has to.** Inside a zipapp `__file__` points
+  *into* the archive (`...\sync.pyz\syncing.py`), a path that does not exist, so the old
+  `SCRIPT_PATH = Path(__file__).resolve()` would protect nothing. `sync.bat` is protected too:
+  with `dist/` on the `PATH`, a run inside it would otherwise delete the wrapper and leave the
+  tool unlaunchable. The negative control is worth knowing — with the protection disabled, a run
+  deletes both files and still exits 0.
+- **`src/__main__.py` is written by hand on purpose.** The one
+  `zipapp.create_archive(main="cli:main")` generates calls `main()` and throws the return value
+  away, so every run would exit 0 — including the ones that report errors. Never switch
+  `build.py` to the `main=` argument.
 - **Exclusions are symmetric**: an excluded entry is neither copied nor deleted. `scan_dest()`
   applies the same `Matcher` as `scan_source()` — that is the mechanism, not an accident.
 - **A failing `rmdir` is expected**, not an error: it means the folder still holds excluded or
@@ -108,13 +124,19 @@ Run the suite from the repo root:
 python -m unittest discover -s tests -t . -v
 ```
 
-`-t .` puts the root on `sys.path`, which is what lets the tests `import sync` with no install
-step. ~155 tests, ~25s — most of it is the e2e module spawning real subprocesses. On Windows
-one case-sensitivity test skips; the symlink tests skip too unless developer mode is on.
+`-t .` puts the repo root on `sys.path` (which is how `tests/test_e2e.py` imports `build`), and
+`tests/__init__.py` prepends `src/` so the test modules can import `matching`, `paths`, and the
+rest with no install step and no build. 156 tests. On Windows one case-sensitivity test skips;
+the symlink tests skip too unless developer mode is on.
+
+`run_cli()` spawns `python src`, not the built archive: running a directory holding a
+`__main__.py` behaves exactly like running the `.pyz`, so the e2e tests stay honest without a
+build step. The one test that does build is the self-protection one, which needs the real
+artifact.
 
 **Keep it green.** The suite was written against the behaviour as of `b5a83c0`, deliberately
-without touching `sync.py`, so that the coming split into modules can be validated by re-running
-it: if it still passes, the refactor changed nothing.
+without touching the code, so that the split into modules could be validated by re-running it.
+Same rule from here on.
 
 Guidance for adding tests:
 
@@ -128,9 +150,11 @@ Guidance for adding tests:
 - Anything touching the filesystem goes under `TreeCase`, which gives an isolated `src`/`dest`
   pair in a temp directory.
 
-Beyond the suite, check the dry run first when trying things by hand — the tool deletes files.
+Beyond the suite, build and exercise the real artifact — the dry run first, the tool deletes
+files.
 
 ```powershell
+python build.py
 $t = Join-Path $env:TEMP "synctest"
 Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$t\src\sub", "$t\src\node_modules", "$t\dst" | Out-Null
@@ -139,9 +163,10 @@ Set-Content "$t\src\sub\b.txt" "world" -Encoding utf8
 Set-Content "$t\src\node_modules\skip.txt" "x" -Encoding utf8
 Set-Content "$t\dst\stale.txt" "old" -Encoding utf8
 Push-Location "$t\dst"
-python D:\MyProjects\Python\sync_folders\sync.py --init --source "$t\src"
-python D:\MyProjects\Python\sync_folders\sync.py -n
-python D:\MyProjects\Python\sync_folders\sync.py -y
+$sync = "D:\MyProjects\Python\sync_folders\dist\sync.pyz"
+python $sync --init --source "$t\src"
+python $sync -n
+python $sync -y
 Pop-Location
 Get-ChildItem -Recurse "$t\dst" | Select-Object -ExpandProperty FullName
 Remove-Item -Recurse -Force $t
@@ -154,8 +179,13 @@ Also worth exercising when touching the relevant code: a second run must be a no
 check), `--init` on an existing config must prompt before overwriting, and a non-TTY run
 without `--source` must exit with an error.
 
+One more check that only the built archive can give, because it is the `__main__.py` being
+tested: a run that reports errors must exit `1`. The cheapest recipe — the source holds a file
+`x`, the destination a folder `x/` holding an *excluded* entry (`x/keep.log`), so phase 1 cannot
+remove it and phase 3 refuses to write through it.
+
 ## Local environment note
 
 On this machine the `py` launcher is not installed, so `sync.bat` always takes the `python`
-fallback branch. Invoke `sync.py` through `python` directly when testing; the `py -3` branch
-of the wrapper cannot be exercised here.
+fallback branch. Invoke `dist\sync.pyz` through `python` directly when testing; the `py -3`
+branch of the wrapper cannot be exercised here.

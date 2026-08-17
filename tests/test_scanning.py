@@ -4,20 +4,21 @@ import io
 import unittest
 from unittest import mock
 
-import sync
+import matching
+import scanning
 
 from .support import (DIR, TreeCase, build, failing_scandir, make_junction,
                       needs_junctions, needs_symlinks)
 
 
 def matcher(*patterns):
-    return sync.Matcher(list(patterns))
+    return matching.Matcher(list(patterns))
 
 
 class TestScanSource(TreeCase):
 
     def scan(self, *patterns, follow=False):
-        return sync.scan_source(self.src, matcher(*patterns), follow)
+        return scanning.scan_source(self.src, matcher(*patterns), follow)
 
     def test_records_files_with_size_and_time(self):
         build(self.src, {"a.txt": "hello"})
@@ -126,7 +127,7 @@ class TestScanSource(TreeCase):
 class TestScanDest(TreeCase):
 
     def scan(self, *patterns, protected=frozenset()):
-        return sync.scan_dest(self.dest, matcher(*patterns), set(protected))
+        return scanning.scan_dest(self.dest, matcher(*patterns), set(protected))
 
     def test_records_entries_with_size_time_and_link_flag(self):
         build(self.dest, {"a.txt": "hello", "sub/": DIR})

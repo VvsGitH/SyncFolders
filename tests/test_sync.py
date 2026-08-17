@@ -6,7 +6,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-import sync
+import matching
+import syncing
 
 from .support import (DIR, TreeCase, build, failing_scandir, failing_unlink,
                       make_junction, needs_junctions, needs_symlinks,
@@ -20,7 +21,7 @@ class SyncCase(TreeCase):
         config = self.dest / "sync.toml"
         out = io.StringIO()
         with redirect_stdout(out):
-            code = sync.sync(self.src, self.dest, sync.Matcher(list(patterns)),
+            code = syncing.sync(self.src, self.dest, matching.Matcher(list(patterns)),
                              follow, config, dry_run=dry_run, verbose=verbose)
         self.out = out.getvalue()
         return code
@@ -167,7 +168,7 @@ class TestProtectedEntries(SyncCase):
         build(self.dest, {"stale.txt": "old"})
         out = io.StringIO()
         with redirect_stdout(out):
-            sync.sync(self.src, self.dest, sync.Matcher([]), False,
+            syncing.sync(self.src, self.dest, matching.Matcher([]), False,
                       self.tmp / "elsewhere.toml", dry_run=False, verbose=True)
         self.assertDest({"a.txt": "x"}, skip=())
 
