@@ -24,6 +24,12 @@ def launcher_paths() -> list[Path]:
     running `sync` inside it would otherwise delete the wrapper and leave the
     tool unlaunchable.
 
+    The path is made absolute but deliberately *not* resolved: the documented
+    POSIX install is a symlink (`ln -s dist/sync.pyz ~/.local/bin/sync`), and
+    resolving would name the archive in the repo instead of the launcher that
+    actually sits in the destination, protecting neither. `sync()` looks at the
+    resolved form as well, so both spellings are covered.
+
     A path in the list that does not exist is harmless: it just hides an entry
     the destination does not hold.
     """
@@ -31,8 +37,13 @@ def launcher_paths() -> list[Path]:
     if not raw:
         return []
     try:
-        app = Path(raw).resolve()
-    except OSError:
+        app = Path(raw).absolute()
+        if app.is_dir():
+            # `python src` from a checkout: a directory is not the shipped
+            # tool, and protecting it would shield a whole destination subtree
+            # from the deletion phase.
+            return []
+    except (OSError, ValueError):
         return []
     if app.suffix.lower() == ".pyz":
         return [app, app.with_name("sync.bat")]

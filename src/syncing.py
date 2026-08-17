@@ -26,11 +26,20 @@ def needs_copy(size: int, mtime: float, dst_size: int, dst_mtime: float) -> bool
 def sync(src: Path, dest: Path, excluded: Matcher, follow: bool,
          config_path: Path, dry_run: bool, verbose: bool) -> int:
     protected = set()
+
+    def protect(p: Path) -> None:
+        # Both spellings: a launcher reached through a symlink lives in the
+        # destination under its own name, while `resolve()` names the file it
+        # points at, somewhere else entirely. Protecting only one of the two
+        # leaves the other deletable.
+        for form in (p, p.resolve()):
+            try:
+                protected.add(form.relative_to(dest).as_posix())
+            except (ValueError, OSError):
+                pass
+
     for p in (*launcher_paths(), config_path):
-        try:
-            protected.add(p.resolve().relative_to(dest).as_posix())
-        except (ValueError, OSError):
-            pass
+        protect(p)
 
     src_dirs, src_files, src_links, src_errors, unscanned = \
         scan_source(src, excluded, follow)
